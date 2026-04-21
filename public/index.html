@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NZB Anime Seasonal</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <section id="listView">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">Local seasonal anime browser</div>
+            <h1>NZB Anime Seasonal</h1>
+            <p class="subtle">AniList seasonal feed with one-tap Sonarr add.</p>
+          </div>
+          <button id="refreshBtn" class="ghost-btn" type="button">Refresh</button>
+        </header>
+
+        <section class="controls card">
+          <div class="quick-season-row" aria-label="Season shortcuts">
+            <button class="chip season-chip" type="button" data-season-mode="previous">Last Season</button>
+            <button class="chip season-chip" type="button" data-season-mode="current">Current Season</button>
+            <button class="chip season-chip" type="button" data-season-mode="next">Next Season</button>
+            <button id="moreToggleBtn" class="chip season-chip" type="button" data-season-mode="more" aria-expanded="false">More</button>
+            <div class="selection-summary selection-summary-inline" id="selectionSummary">Loading...</div>
+          </div>
+
+          <div class="advanced-panel" id="advancedPanel" hidden>
+            <div class="row">
+              <label>
+                Season
+                <select id="seasonSelect">
+                  <option value="SPRING">Spring</option>
+                  <option value="SUMMER">Summer</option>
+                  <option value="FALL">Fall</option>
+                  <option value="WINTER">Winter</option>
+                </select>
+              </label>
+              <label>
+                Year
+                <input id="yearInput" type="number" min="1970" max="2100" />
+              </label>
+            </div>
+
+            <label>
+              Search
+              <input id="searchInput" type="search" placeholder="Search titles, genres, tags..." />
+            </label>
+
+            <div class="chips" id="sortChips">
+              <button data-sort="TRENDING_DESC" class="chip active" type="button">Trending</button>
+              <button data-sort="POPULARITY_DESC" class="chip" type="button">Popular</button>
+              <button data-sort="SCORE_DESC" class="chip" type="button">Top rated</button>
+              <button data-sort="START_DATE_DESC" class="chip" type="button">Newest</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="status-line">
+          <span id="statusText">Loading...</span>
+          <span class="sonarr-state" aria-live="polite">
+            <span id="sonarrSpinner" class="spinner" hidden></span>
+            <span id="sonarrText"></span>
+          </span>
+        </section>
+
+        <main id="grid" class="grid"></main>
+
+        <div class="footer-actions">
+          <button id="loadMoreBtn" class="primary-btn" type="button">Load more</button>
+        </div>
+      </section>
+
+      <section id="detailView" class="detail-view" hidden>
+        <div class="detail-topbar">
+          <button id="backBtn" class="ghost-btn" type="button">Back</button>
+          <a id="detailExternalLink" class="ghost-btn" target="_blank" rel="noreferrer">AniList</a>
+        </div>
+
+        <article class="detail-card card">
+          <div class="detail-hero">
+            <img id="detailBannerImage" class="detail-banner" alt="Banner" />
+            <div class="detail-hero-overlay">
+              <img id="detailPoster" class="detail-poster" alt="Poster" />
+              <div class="detail-heading">
+                <h2 id="detailTitle"></h2>
+                <p id="detailMeta"></p>
+                <div class="detail-state-row">
+                  <span id="detailAiring" class="detail-pill"></span>
+                  <span id="detailSonarrState" class="detail-pill detail-pill-muted"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="detail-body">
+            <p id="detailDescription" class="detail-description"></p>
+            <div id="detailChips" class="chips"></div>
+            <div id="detailStats" class="detail-stats"></div>
+            <div class="actions detail-actions">
+              <button id="detailAddBtn" class="primary-btn" type="button">Add to Sonarr</button>
+              <span id="detailResult" class="result"></span>
+            </div>
+          </div>
+        </article>
+      </section>
+    </div>
+
+    <template id="cardTemplate">
+      <article class="anime-card card clickable-card" tabindex="0" role="button">
+        <div class="poster-wrap">
+          <img class="poster" alt="Poster" />
+          <div class="badge" data-field="airing"></div>
+        </div>
+        <div class="card-body">
+          <div class="title-row">
+            <h2 class="title"></h2>
+            <a class="external-link" target="_blank" rel="noreferrer">AniList</a>
+          </div>
+          <div class="meta"></div>
+          <p class="summary"></p>
+          <div class="chips mini" data-field="genres"></div>
+          <div class="actions">
+            <button class="primary-btn add-btn" type="button">Add to Sonarr</button>
+            <span class="result"></span>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
