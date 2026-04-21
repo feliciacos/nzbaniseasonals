@@ -82,12 +82,12 @@ http://localhost:8787
 - The app checks your **Sonarr library first**
 - Matching uses:
   - English + Japanese titles
-  - synonyms
-  - alternate titles from Sonarr
+  - Synonyms
+  - Alternate titles from Sonarr
 - Adding:
-  1. lookup in Sonarr
-  2. select best match
-  3. send add request to Sonarr
+  1. Lookup in Sonarr
+  2. Select best match
+  3. Send add request to Sonarr
 
 ---
 
@@ -95,15 +95,7 @@ http://localhost:8787
 
 - Use **Last / Current / Next Season** buttons to browse
 - Click **More** for:
-  - season/year selection
-  - search
-  - sorting
-
-- Click an anime:
-  - opens detail page
-  - shows full info
-  - allows adding to Sonarr
-
-- Button states:
-  - `Add to Sonarr` → not added yet
-  - `Added` → already in Sonarr
+  - Season/year selection
+  - Search
+  - Sorting
+- Click an anime to open the full details page, shows description and other information, this page also allows adding to Sonarr.
