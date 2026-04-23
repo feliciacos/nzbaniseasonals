@@ -68,6 +68,17 @@ RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 | `RADARR_ROOT_FOLDER_PATH`   | Root folder for movies           |
 | `RADARR_MONITOR_NEW_ITEMS`  | What to monitor                  |
 
+## Optional Overwrites
+| Variable         | Description                                                  | Values                                                          |
+| ---------------- | ------------------------------------------------------------ | --------------------------------------------------------------- |
+| `PORT`           | Overwrite the local port number                              | `8787` or any valid port                                        |
+| `DEFAULTSEASON`  | Sets the default selected season button on load              | `last` / `current` / `next`                                     |
+| `DEFAULTSORT`    | Sets the default sorting button on load                      | `Trending` / `Popular` / `Top` / `Newest` / `Name`              |
+| `DEFAULTTYPE`    | Sets how many extra pages auto-load when the list is visible | `ALL` / `TV` / `MOVIE` / `OVA` / `ONA` / `TV_SHORT` / `SPECIAL` |
+| `ALREADYINLIB`   | Sets the default library filter on load                      | `True` / `False` / `None`                                       |
+| `PER_PAGE`       | Sets how many titles load per AniList request                | Any positive integer, usually `20`                              |
+| `AUTOLOAD_PAGES` | Sets how many extra pages auto-load when the list is visible | Any positive integer, usually `1` to `8`                        |
+
 ---
 
 ### 3. Run with Docker
