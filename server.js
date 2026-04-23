@@ -34,6 +34,11 @@ const config = {
   radarrQualityProfileId: Number(process.env.RADARR_QUALITY_PROFILE_ID || fileConfig.radarrQualityProfileId || 1),
   radarrRootFolderPath: process.env.RADARR_ROOT_FOLDER_PATH || fileConfig.radarrRootFolderPath,
   radarrMonitorNewItems: process.env.RADARR_MONITOR_NEW_ITEMS || fileConfig.radarrMonitorNewItems || 'all',
+
+  defaultSeason: process.env.DEFAULTSEASON || fileConfig.defaultSeason || 'current season',
+  defaultSort: process.env.DEFAULTSORT || fileConfig.defaultSort || 'Trending',
+  alreadyInLib: process.env.ALREADYINLIB || fileConfig.alreadyInLib || 'None',
+  defaultType: process.env.DEFAULTTYPE || fileConfig.defaultType || 'ALL',
 };
 
 if (!config.sonarrUrl || !config.sonarrApiKey) {
@@ -104,6 +109,38 @@ function currentSeasonParts(date = new Date()) {
   if (month >= 6 && month <= 8) return { season: 'SUMMER', seasonYear: year };
   if (month >= 9 && month <= 11) return { season: 'FALL', seasonYear: year };
   return { season: 'WINTER', seasonYear: month === 12 ? year + 1 : year };
+}
+
+function normalizeSetting(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+}
+
+function defaultSeasonMode(value) {
+  const v = normalizeSetting(value);
+  if (v === 'last season' || v === 'previous season' || v === 'last' || v === 'previous') return 'previous';
+  if (v === 'next season' || v === 'next') return 'next';
+  return 'current';
+}
+
+function defaultSortValue(value) {
+  const v = String(value || '').trim().toLowerCase();
+
+  if (v === 'popular') return 'POPULARITY_DESC';
+  if (v === 'top' || v === 'top rated' || v === 'score') return 'SCORE_DESC';
+  if (v === 'newest' || v === 'new') return 'START_DATE_DESC';
+  if (v === 'name' || v === 'a z' || v === 'title') return 'TITLE_ROMAJI';
+  return 'TRENDING_DESC';
+}
+
+function alreadyInLibValue(value) {
+  const v = String(value || '').trim().toLowerCase();
+
+  if (v === 'true') return 'IN';
+  if (v === 'false') return 'OUT';
+  return 'ALL'; // None or anything else
 }
 
 const ANILIST_LIST_QUERY = `
@@ -876,7 +913,13 @@ async function handleApi(req, res, url) {
     const season = String(url.searchParams.get('season') || fallback.season).toUpperCase();
     const seasonYear = Number(url.searchParams.get('seasonYear') || fallback.seasonYear);
     const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
-    const perPage = Math.min(25, Math.max(1, Number(url.searchParams.get('perPage') || '20')));
+    const perPage = Math.min(
+      50,
+      Math.max(
+        1,
+        Number(url.searchParams.get('perPage') || process.env.PER_PAGE || '20')
+      )
+    );
     const search = url.searchParams.get('search') || '';
     const sort = (url.searchParams.get('sort') || 'TRENDING_DESC')
       .split(',')
@@ -1102,10 +1145,15 @@ async function handleApi(req, res, url) {
     json(res, 200, {
       season,
       seasonYear,
+      defaultSeason: defaultSeasonMode(config.defaultSeason),
+      defaultSort: defaultSortValue(config.defaultSort),
+      alreadyInLib: alreadyInLibValue(config.alreadyInLib),
       sonarrConfigured: Boolean(config.sonarrUrl && config.sonarrApiKey),
       sonarrRootFolderPath: sonarrRootFolderPath || null,
       radarrConfigured: Boolean(config.radarrUrl && config.radarrApiKey),
       radarrRootFolderPath: radarrRootFolderPath || null,
+      autoloadPages: Number(process.env.AUTOLOAD_PAGES || 4),
+      defaultType: String(config.defaultType || 'ALL').toUpperCase(),
     });
     return;
   }

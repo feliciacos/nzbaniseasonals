@@ -12,7 +12,6 @@ const yearInput = document.querySelector('#yearInput');
 const searchInput = document.querySelector('#searchInput');
 const sortChips = document.querySelector('#sortChips');
 const cardTemplate = document.querySelector('#cardTemplate');
-const selectionSummary = document.querySelector('#selectionSummary');
 const listView = document.querySelector('#listView');
 const detailView = document.querySelector('#detailView');
 const backBtn = document.querySelector('#backBtn');
@@ -64,7 +63,8 @@ let currentDetailId = null;
 let detailFetchToken = 0;
 let searchTimer = null;
 let sonarrDebugLog = [];
-const AUTO_PREFETCH_MAX_PAGES = 4;
+let AUTO_PREFETCH_MAX_PAGES = 4;
+let autoLoadTimer = null;
 
 const seasonLabel = (season) => ({ SPRING: 'Spring', SUMMER: 'Summer', FALL: 'Fall', WINTER: 'Winter' }[season] || season);
 const seasonOrder = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
@@ -254,6 +254,34 @@ function matchesFilters(item) {
 
 function getVisibleItems() {
   return items.filter(matchesFilters);
+}
+
+async function ensureMorePagesLoaded(maxPages = AUTO_PREFETCH_MAX_PAGES) {
+  let attempts = 0;
+
+  while (attempts < maxPages && hasNextPage) {
+    await new Promise(requestAnimationFrame);
+
+    if (loadingAnime) return;
+
+    const top = loadMoreBtn?.getBoundingClientRect().top ?? Infinity;
+    if (top >= window.innerHeight + 250) return;
+
+    attempts += 1;
+    await fetchAnime(false);
+  }
+}
+
+function scheduleAutoLoadMore() {
+  clearTimeout(autoLoadTimer);
+  autoLoadTimer = setTimeout(() => {
+    void ensureMorePagesLoaded();
+  }, 0);
+}
+
+async function refreshAnime(reset = true) {
+  await fetchAnime(reset);
+  await ensureMorePagesLoaded();
 }
 
 async function ensureVisibleItems(maxPages = AUTO_PREFETCH_MAX_PAGES) {
@@ -512,20 +540,31 @@ function updateStatusLine() {
   }
 }
 
-function syncSelectionSummary() {
-  const parts = [
-    `${seasonLabel(currentFilters.season)} ${currentFilters.seasonYear}`,
-    activeSort.replace('_DESC', '').toLowerCase(),
-  ];
+const sortLabels = {
+  TRENDING_DESC: 'Trending',
+  POPULARITY_DESC: 'Popular',
+  SCORE_DESC: 'Top',
+  START_DATE_DESC: 'Newest',
+  TITLE_ROMAJI: 'Name',
+};
 
-  if (currentFilters.type && currentFilters.type !== 'ALL') {
-    parts.push(currentFilters.type.replace('_', ' ').toLowerCase());
-  }
+function syncStatusText() {
+  const sortLabel = sortLabels[activeSort] || activeSort;
+  statusText.textContent = `${seasonLabel(currentFilters.season)} ${currentFilters.seasonYear} - ${sortLabel} - ${items.length} titles loaded`;
+}
 
-  if (currentFilters.sonarrState === 'IN') parts.push('already in sonarr');
-  if (currentFilters.sonarrState === 'OUT') parts.push('not in sonarr');
+function syncSortButtons() {
+  sortChips.querySelectorAll('.chip').forEach((chip) => {
+    chip.classList.toggle('active', chip.dataset.sort === activeSort);
+  });
+}
 
-  selectionSummary.textContent = parts.join(' · ');
+async function setSort(nextSort) {
+  if (activeSort === nextSort) return;
+  activeSort = nextSort;
+  syncSortButtons();
+  syncStatusText();
+  await refreshAnime(true);
 }
 
 function syncSonarrFilterButtons() {
@@ -536,9 +575,8 @@ function syncSonarrFilterButtons() {
 async function setSonarrFilter(nextValue) {
   currentFilters.sonarrState = nextValue;
   syncSonarrFilterButtons();
-  syncSelectionSummary();
-  await fetchAnime(true);
-  await ensureVisibleItems();
+  syncStatusText();
+  await refreshAnime(true);
 }
 
 function updateQuickButtons() {
@@ -552,7 +590,9 @@ function updateQuickButtons() {
   quickSeasonButtons.forEach((button) => {
     const mode = button.dataset.seasonMode;
     const choice = choices[mode];
-    const isActive = choice?.season === currentFilters.season && choice?.seasonYear === currentFilters.seasonYear;
+    const isActive =
+      choice?.season === currentFilters.season &&
+      choice?.seasonYear === currentFilters.seasonYear;
     button.classList.toggle('active', isActive);
   });
 
@@ -572,9 +612,8 @@ async function setFilters(nextFilters, { closeAdvanced = false } = {}) {
   }
 
   updateQuickButtons();
-  syncSelectionSummary();
-  await fetchAnime(true);
-  await ensureVisibleItems();
+  syncStatusText();
+  await refreshAnime(true);
 }
 
 function libraryStateForItem(item) {
@@ -855,21 +894,32 @@ async function refreshLibraryStatuses() {
 async function loadMeta() {
   const response = await fetch('/api/meta');
   meta = await response.json();
+  AUTO_PREFETCH_MAX_PAGES = Number(meta?.autoloadPages || 4);
 
-  const fallback = getCurrentSeason();
+  const baseSeason = getCurrentSeason();
+  const defaultSeasonMode = meta?.defaultSeason || 'current';
+
+  const initialSeason =
+    defaultSeasonMode === 'previous' ? shiftSeason(baseSeason, -1)
+      : defaultSeasonMode === 'next' ? shiftSeason(baseSeason, 1)
+        : baseSeason;
+
   currentFilters = {
-    season: meta?.season || fallback.season,
-    seasonYear: Number(meta?.seasonYear || fallback.seasonYear),
-    type: 'ALL',
-    sonarrState: 'ALL',
+    season: initialSeason.season,
+    seasonYear: Number(initialSeason.seasonYear),
+    type: meta?.defaultType || 'ALL',
+    sonarrState: meta?.alreadyInLib || 'ALL',
   };
+
+  activeSort = meta?.defaultSort || 'TRENDING_DESC';
 
   seasonSelect.value = currentFilters.season;
   yearInput.value = String(currentFilters.seasonYear);
-  typeSelect.value = 'ALL';
+  typeSelect.value = currentFilters.type || 'ALL';
   syncSonarrFilterButtons();
+  syncSortButtons();
   updateQuickButtons();
-  syncSelectionSummary();
+  syncStatusText();
 }
 
 async function loadSonarrLibrary() {
@@ -992,7 +1042,7 @@ async function fetchAnime(reset = false) {
     hasNextPage = Boolean(data.pageInfo?.hasNextPage);
     page += 1;
     renderVisibleView();
-    statusText.textContent = `${seasonLabel(data.season)} ${data.seasonYear} · ${items.length} titles loaded`;
+    syncStatusText();
     loadMoreBtn.disabled = !hasNextPage;
     loadMoreBtn.textContent = hasNextPage ? 'Load more' : 'No more results';
 
@@ -1008,6 +1058,7 @@ async function fetchAnime(reset = false) {
     renderVisibleView();
   } finally {
     loadingAnime = false;
+    scheduleAutoLoadMore();
   }
 }
 
@@ -1090,13 +1141,13 @@ moreToggleBtn.addEventListener('click', () => {
 sortChips.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-sort]');
   if (!button) return;
-  activeSort = button.dataset.sort;
-  sortChips.querySelectorAll('.chip').forEach((chip) => chip.classList.toggle('active', chip === button));
-  syncSelectionSummary();
-  fetchAnime(true);
+  void setSort(button.dataset.sort);
 });
 
-loadMoreBtn.addEventListener('click', () => fetchAnime(false));
+loadMoreBtn.addEventListener('click', () => {
+  void refreshAnime(false);
+});
+
 refreshBtn.addEventListener('click', async () => {
   if (meta?.sonarrConfigured) {
     await loadSonarrLibrary().catch(() => null);
@@ -1104,7 +1155,7 @@ refreshBtn.addEventListener('click', async () => {
   if (meta?.radarrConfigured) {
     await loadRadarrLibrary().catch(() => null);
   }
-  fetchAnime(true);
+  await refreshAnime(true);
 });
 
 backBtn.addEventListener('click', () => {
@@ -1195,8 +1246,11 @@ detailAddBtn.addEventListener('click', async () => {
 
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => renderVisibleView(), 120);
+  searchTimer = setTimeout(() => {
+    void refreshAnime(true);
+  }, 120);
 });
+
 seasonSelect.addEventListener('change', () => {
   setFilters({ season: seasonSelect.value, seasonYear: Number(yearInput.value) }, { closeAdvanced: false });
 });
@@ -1260,6 +1314,6 @@ window.addEventListener('hashchange', handleRoute);
   }
 
   updateStatusLine();
-  await fetchAnime(true);
+  await refreshAnime(true);
   handleRoute();
 })();

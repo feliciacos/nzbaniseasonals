@@ -168,8 +168,8 @@ select:focus {
 }
 
 .season-chip.active {
-  background: rgba(72, 214, 163, .14);
-  border-color: rgba(72, 214, 163, .55);
+  background: rgba(124, 92, 255, .18);
+  border-color: rgba(124, 92, 255, .55);
 }
 
 .primary-btn {
