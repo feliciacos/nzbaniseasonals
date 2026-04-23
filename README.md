@@ -1,3 +1,10 @@
+## Screenshots
+# Homepage
+<img width="1491" height="939" alt="image" src="https://github.com/user-attachments/assets/d26d58df-384a-4d5e-92f1-b77786b6247f" />
+# Anime Page
+<img width="1504" height="1168" alt="image" src="https://github.com/user-attachments/assets/9c8bd795-563a-456e-9d7b-4a8023037815" />
+# Filters
+<img width="1498" height="1096" alt="image" src="https://github.com/user-attachments/assets/bf6d325a-810f-40ab-8e10-150ecfa29cdb" />
 
 # NZB Anime Seasonal
 
