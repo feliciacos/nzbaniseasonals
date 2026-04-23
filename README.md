@@ -119,7 +119,7 @@ http://localhost:8787
 
 ## Screenshots
 ### Homepage
-<img width="1491" height="939" alt="image" src="https://github.com/user-attachments/assets/d26d58df-384a-4d5e-92f1-b77786b6247f" />
+<img width="1487" height="933" alt="image" src="https://github.com/user-attachments/assets/17f4f468-d51a-4412-a2cb-a00c76d7328c" />
 
 ### Anime Page
 <img width="1504" height="1168" alt="image" src="https://github.com/user-attachments/assets/9c8bd795-563a-456e-9d7b-4a8023037815" />
