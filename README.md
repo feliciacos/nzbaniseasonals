@@ -50,23 +50,23 @@ RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 
 ### Environment Variables Explained
 ## Sonarr
-| Variable                    | Description                      |
-| --------------------------- | -------------------------------- |
-| `SONARR_URL`                | Full URL to your Sonarr instance |
-| `SONARR_API_KEY`            | Your Sonarr API key              |
-| `SONARR_QUALITY_PROFILE_ID` | Quality profile ID               |
-| `SONARR_ROOT_FOLDER_PATH`   | Root folder for anime            |
-| `SONARR_MONITOR_NEW_ITEMS`  | What to monitor                  |
-| `SONARR_SEASON_FOLDER`      | Create season folders            |
+| Variable                    | Description                             |
+| --------------------------- | --------------------------------------- |
+| `SONARR_URL`                | Full URL to your Sonarr instance + Port |
+| `SONARR_API_KEY`            | Your Sonarr API key                     |
+| `SONARR_QUALITY_PROFILE_ID` | Quality profile ID                      |
+| `SONARR_ROOT_FOLDER_PATH`   | Root folder for anime                   |
+| `SONARR_MONITOR_NEW_ITEMS`  | What to monitor                         |
+| `SONARR_SEASON_FOLDER`      | Create season folders                   |
 
 ## Radarr
-| Variable                    | Description                      |
-| --------------------------- | -------------------------------- |
-| `RADARR_URL`                | Full URL to your Radarr instance |
-| `RADARR_API_KEY`            | Your Radarr API key              |
-| `RADARR_QUALITY_PROFILE_ID` | Quality profile ID               |
-| `RADARR_ROOT_FOLDER_PATH`   | Root folder for movies           |
-| `RADARR_MONITOR_NEW_ITEMS`  | What to monitor                  |
+| Variable                    | Description                             |
+| --------------------------- | --------------------------------------- |
+| `RADARR_URL`                | Full URL to your Radarr instance + Port |
+| `RADARR_API_KEY`            | Your Radarr API key                     |
+| `RADARR_QUALITY_PROFILE_ID` | Quality profile ID                      |
+| `RADARR_ROOT_FOLDER_PATH`   | Root folder for movies                  |
+| `RADARR_MONITOR_NEW_ITEMS`  | What to monitor                         |
 
 ## Optional Overwrites
 | Variable         | Description                                                  | Values                                                          |
