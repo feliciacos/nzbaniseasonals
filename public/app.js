@@ -28,6 +28,13 @@ const detailChips = document.querySelector('#detailChips');
 const detailStats = document.querySelector('#detailStats');
 const detailAddBtn = document.querySelector('#detailAddBtn');
 const detailResult = document.querySelector('#detailResult');
+const sonarrInfoBtn = document.querySelector('#sonarrInfoBtn');
+const sonarrLogDialog = document.querySelector('#sonarrLogDialog');
+const sonarrLogContent = document.querySelector('#sonarrLogContent');
+const sonarrLogClose = document.querySelector('#sonarrLogClose');
+const typeSelect = document.querySelector('#typeSelect');
+const sonarrInBtn = document.querySelector('#sonarrInBtn');
+const sonarrOutBtn = document.querySelector('#sonarrOutBtn');
 
 let page = 1;
 let hasNextPage = true;
@@ -35,21 +42,65 @@ let loadingAnime = false;
 let items = [];
 let activeSort = 'TRENDING_DESC';
 let meta = null;
-let currentFilters = getCurrentSeason();
+let currentFilters = {
+  ...getCurrentSeason(),
+  type: 'ALL',
+  sonarrState: 'ALL',
+};
 let sonarrStatusMap = new Map();
+let radarrStatusMap = new Map();
 let addingIds = new Set();
 let sonarrLibrary = null;
 let sonarrLibraryPromise = null;
 let sonarrLibraryLoading = false;
 let sonarrLibraryError = null;
+let radarrLibrary = null;
+let radarrLibraryPromise = null;
+let radarrLibraryLoading = false;
+let radarrLibraryError = null;
 let loadMoreObserver = null;
 let currentDetailAnime = null;
 let currentDetailId = null;
 let detailFetchToken = 0;
 let searchTimer = null;
+let sonarrDebugLog = [];
+const AUTO_PREFETCH_MAX_PAGES = 4;
 
 const seasonLabel = (season) => ({ SPRING: 'Spring', SUMMER: 'Summer', FALL: 'Fall', WINTER: 'Winter' }[season] || season);
 const seasonOrder = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
+
+function pushSonarrLog(entry) {
+  const item = {
+    time: new Date().toISOString(),
+    ...entry,
+  };
+  sonarrDebugLog.unshift(item);
+  sonarrDebugLog = sonarrDebugLog.slice(0, 50);
+
+  if (sonarrLogContent) {
+    sonarrLogContent.innerHTML = sonarrDebugLog.map((log) => {
+      const payload = log.payload ? `<pre>${JSON.stringify(log.payload, null, 2)}</pre>` : '';
+      return `<div class="sonarr-log-entry">
+        <div class="sonarr-log-time">${log.time}</div>
+        <div class="sonarr-log-message">${log.message}</div>
+        ${payload}
+      </div>`;
+    }).join('');
+  }
+}
+
+async function readApiResponse(response) {
+  const raw = await response.text();
+  let data = {};
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { raw };
+    }
+  }
+  return { ok: response.ok, status: response.status, data };
+}
 
 function getCurrentSeason(date = new Date()) {
   const month = date.getMonth() + 1;
@@ -86,8 +137,8 @@ function formatCountdown(minutes) {
 
 function airingLabel(item) {
   if (item?.status === 'RELEASING' && item?.nextAiringEpisode) {
-    const mins = Math.max(0, Math.round(item.nextAiringEpisode.timeUntilAiring / 60));
-    return `Ep ${item.nextAiringEpisode.episode} in ${formatCountdown(mins)}`;
+    const hours = Math.max(0, Math.round(Number(item.nextAiringEpisode.timeUntilAiring || 0) / 3600));
+    return `Ep ${item.nextAiringEpisode.episode} in ${hours}h`;
   }
   if (item?.status === 'FINISHED') return 'Finished';
   if (item?.status === 'NOT_YET_RELEASED') return 'Upcoming';
@@ -142,10 +193,21 @@ function chipify(items, container) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   container.innerHTML = '';
 
-  for (const item of list) {
+  const maxVisible = container.classList.contains('mini') ? 2 : list.length;
+  const visible = list.slice(0, maxVisible);
+  const hiddenCount = list.length - visible.length;
+
+  for (const item of visible) {
     const chip = document.createElement('span');
     chip.className = 'chip-item';
     chip.textContent = item;
+    container.appendChild(chip);
+  }
+
+  if (hiddenCount > 0) {
+    const chip = document.createElement('span');
+    chip.className = 'chip-item';
+    chip.textContent = `+${hiddenCount}`;
     container.appendChild(chip);
   }
 }
@@ -174,9 +236,38 @@ function matchesSearchQuery(item, query) {
   return q.split(' ').every((token) => haystack.includes(token));
 }
 
+function matchesFilters(item) {
+  if (!matchesSearchQuery(item, searchInput.value.trim())) return false;
+
+  if (currentFilters.type && currentFilters.type !== 'ALL' && item.format !== currentFilters.type) {
+    return false;
+  }
+
+  const statusMap = item?.format === 'MOVIE' ? radarrStatusMap : sonarrStatusMap;
+  const inLibrary = Boolean(item.sonarrAdded || item.radarrAdded || statusMap.get(item.id)?.inLibrary);
+
+  if (currentFilters.sonarrState === 'IN' && !inLibrary) return false;
+  if (currentFilters.sonarrState === 'OUT' && inLibrary) return false;
+
+  return true;
+}
+
 function getVisibleItems() {
-  const query = searchInput.value.trim();
-  return items.filter((item) => matchesSearchQuery(item, query));
+  return items.filter(matchesFilters);
+}
+
+async function ensureVisibleItems(maxPages = AUTO_PREFETCH_MAX_PAGES) {
+  let attempts = 0;
+
+  while (
+    attempts < maxPages &&
+    !loadingAnime &&
+    hasNextPage &&
+    getVisibleItems().length === 0
+  ) {
+    attempts += 1;
+    await fetchAnime(false);
+  }
 }
 
 function animeTitleVariants(anime) {
@@ -196,6 +287,66 @@ function animeTitleVariants(anime) {
   }
 
   return [...keys];
+}
+
+function managerForItem(item) {
+  return item?.format === 'MOVIE' ? 'radarr' : 'sonarr';
+}
+
+function managerLabelForItem(item) {
+  return managerForItem(item) === 'radarr' ? 'Radarr' : 'Sonarr';
+}
+
+function statusMapForItem(item) {
+  return managerForItem(item) === 'radarr' ? radarrStatusMap : sonarrStatusMap;
+}
+
+function libraryForItem(item) {
+  return managerForItem(item) === 'radarr' ? radarrLibrary : sonarrLibrary;
+}
+
+function libraryLoadingForItem(item) {
+  return managerForItem(item) === 'radarr' ? radarrLibraryLoading : sonarrLibraryLoading;
+}
+
+function libraryConfiguredForItem(item) {
+  return managerForItem(item) === 'radarr' ? meta?.radarrConfigured : meta?.sonarrConfigured;
+}
+
+function normalizeFranchiseTitle(value = '') {
+  return normalizeText(String(value))
+    .replace(/\b(1st|2nd|3rd|4th|\d+(st|nd|rd|th))\s+stage\b/gi, '')
+    .replace(/\bseason\s*\d+\b/gi, '')
+    .replace(/\bpart\s*\d+\b/gi, '')
+    .replace(/\s*[:\-–—]\s*.*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getSonarrFamilyTitles(anime) {
+  const titles = new Set(animeTitleVariants(anime));
+
+  const relations = anime?.relations?.edges || [];
+  for (const edge of relations) {
+    const relationType = String(edge?.relationType || '').toUpperCase();
+    if (!['SEQUEL', 'PREQUEL', 'PARENT', 'SIDE_STORY', 'ADAPTATION'].includes(relationType)) continue;
+
+    const node = edge?.node;
+    if (!node) continue;
+
+    const relatedTitles = [
+      node?.title?.romaji,
+      node?.title?.english,
+      node?.title?.native,
+    ].filter(Boolean);
+
+    for (const title of relatedTitles) {
+      titles.add(normalizeText(title));
+      titles.add(normalizeFranchiseTitle(title));
+    }
+  }
+
+  return [...titles].filter(Boolean);
 }
 
 function buildSonarrIndex(seriesList) {
@@ -248,8 +399,8 @@ function getSonarrMatch(item) {
     return sonarrLibrary.index.byTvdbId.get(animeTvdbId);
   }
 
-  const variants = animeTitleVariants(item);
-  for (const variant of variants) {
+  const exactVariants = animeTitleVariants(item);
+  for (const variant of exactVariants) {
     const candidate =
       sonarrLibrary.index.byTitle.get(variant) ||
       sonarrLibrary.index.bySortTitle.get(variant) ||
@@ -259,6 +410,51 @@ function getSonarrMatch(item) {
       sonarrLibrary.index.byBaseSlug.get(variant) ||
       sonarrLibrary.index.byAltTitle.get(variant) ||
       sonarrLibrary.index.byBaseAltTitle.get(variant);
+    if (candidate) return candidate;
+  }
+
+  const familyTitles = getSonarrFamilyTitles(item);
+  if (!familyTitles.length) return null;
+
+  for (const series of sonarrLibrary.series || []) {
+    const seriesTitles = [
+      series?.title,
+      series?.sortTitle,
+      series?.titleSlug,
+      ...(Array.isArray(series?.alternateTitles)
+        ? series.alternateTitles.map((alt) => (typeof alt === 'string' ? alt : alt?.title)).filter(Boolean)
+        : []),
+    ]
+      .map((title) => normalizeFranchiseTitle(title))
+      .filter(Boolean);
+
+    if (familyTitles.some((familyTitle) => seriesTitles.includes(normalizeFranchiseTitle(familyTitle)))) {
+      return series;
+    }
+  }
+
+  return null;
+}
+
+function getRadarrMatch(item) {
+  if (!radarrLibrary) return null;
+
+  const movieTvdbId = item?.tvdbId != null ? String(item.tvdbId) : null;
+  if (movieTvdbId && radarrLibrary.index.byTvdbId.has(movieTvdbId)) {
+    return radarrLibrary.index.byTvdbId.get(movieTvdbId);
+  }
+
+  const variants = animeTitleVariants(item);
+  for (const variant of variants) {
+    const candidate =
+      radarrLibrary.index.byTitle.get(variant) ||
+      radarrLibrary.index.bySortTitle.get(variant) ||
+      radarrLibrary.index.bySlug.get(variant) ||
+      radarrLibrary.index.byBaseTitle.get(variant) ||
+      radarrLibrary.index.byBaseSortTitle.get(variant) ||
+      radarrLibrary.index.byBaseSlug.get(variant) ||
+      radarrLibrary.index.byAltTitle.get(variant) ||
+      radarrLibrary.index.byBaseAltTitle.get(variant);
     if (candidate) return candidate;
   }
 
@@ -275,23 +471,74 @@ function cleanHtml(text) {
 function updateStatusLine() {
   if (sonarrLibraryLoading) {
     sonarrSpinner.hidden = false;
-    sonarrText.textContent = 'Loading Sonarr data...';
+    sonarrText.textContent = 'Loading sonarr...';
     return;
   }
+
+  if (radarrLibraryLoading) {
+    sonarrSpinner.hidden = false;
+    sonarrText.textContent = 'Loading radarr...';
+    return;
+  }
+
   sonarrSpinner.hidden = true;
-  if (!meta?.sonarrConfigured) {
-    sonarrText.textContent = 'Sonarr not configured yet';
-  } else if (sonarrLibraryError) {
-    sonarrText.textContent = `Sonarr check failed: ${sonarrLibraryError}`;
-  } else if (sonarrLibrary) {
-    sonarrText.textContent = 'Sonarr library synced';
-  } else {
-    sonarrText.textContent = 'Sonarr ready';
+
+  const sonarrReady = Boolean(meta?.sonarrConfigured);
+  const radarrReady = Boolean(meta?.radarrConfigured);
+
+  if (!sonarrReady && !radarrReady) {
+    sonarrText.textContent = 'No libraries configured';
+    return;
+  }
+
+  if (sonarrLibraryError || radarrLibraryError) {
+    sonarrText.textContent = `Library sync failed: ${sonarrLibraryError || radarrLibraryError}`;
+    return;
+  }
+
+  if (sonarrReady && radarrReady) {
+    sonarrText.textContent = 'Synced Libraries';
+    return;
+  }
+
+  if (sonarrReady) {
+    sonarrText.textContent = 'Sonarr synced';
+    return;
+  }
+
+  if (radarrReady) {
+    sonarrText.textContent = 'Radarr synced';
+    return;
   }
 }
 
 function syncSelectionSummary() {
-  selectionSummary.textContent = `${seasonLabel(currentFilters.season)} ${currentFilters.seasonYear} · ${activeSort.replace('_DESC', '').toLowerCase()}`;
+  const parts = [
+    `${seasonLabel(currentFilters.season)} ${currentFilters.seasonYear}`,
+    activeSort.replace('_DESC', '').toLowerCase(),
+  ];
+
+  if (currentFilters.type && currentFilters.type !== 'ALL') {
+    parts.push(currentFilters.type.replace('_', ' ').toLowerCase());
+  }
+
+  if (currentFilters.sonarrState === 'IN') parts.push('already in sonarr');
+  if (currentFilters.sonarrState === 'OUT') parts.push('not in sonarr');
+
+  selectionSummary.textContent = parts.join(' · ');
+}
+
+function syncSonarrFilterButtons() {
+  sonarrInBtn?.classList.toggle('active', currentFilters.sonarrState === 'IN');
+  sonarrOutBtn?.classList.toggle('active', currentFilters.sonarrState === 'OUT');
+}
+
+async function setSonarrFilter(nextValue) {
+  currentFilters.sonarrState = nextValue;
+  syncSonarrFilterButtons();
+  syncSelectionSummary();
+  await fetchAnime(true);
+  await ensureVisibleItems();
 }
 
 function updateQuickButtons() {
@@ -312,39 +559,48 @@ function updateQuickButtons() {
   moreToggleBtn.classList.toggle('active', advancedPanel.hidden === false);
 }
 
-function setFilters(nextFilters, { closeAdvanced = false } = {}) {
-  currentFilters = { ...nextFilters };
+async function setFilters(nextFilters, { closeAdvanced = false } = {}) {
+  currentFilters = { ...currentFilters, ...nextFilters };
   seasonSelect.value = currentFilters.season;
   yearInput.value = String(currentFilters.seasonYear);
+  typeSelect.value = currentFilters.type || 'ALL';
+  syncSonarrFilterButtons();
+
   if (closeAdvanced) {
     advancedPanel.hidden = true;
     moreToggleBtn.setAttribute('aria-expanded', 'false');
   }
+
   updateQuickButtons();
   syncSelectionSummary();
-  fetchAnime(true);
+  await fetchAnime(true);
+  await ensureVisibleItems();
 }
 
-function sonarrStateForItem(item) {
-  if (addingIds.has(item.id)) return { state: 'adding', text: 'Adding...', disabled: true };
-  const known = sonarrStatusMap.get(item.id);
-  if (item.sonarrAdded || known?.inSonarr) return { state: 'added', text: 'Added', disabled: true };
-  if (!meta?.sonarrConfigured) return { state: 'unconfigured', text: 'Sonarr not set', disabled: true };
-  if (sonarrLibraryLoading && !sonarrStatusMap.has(item.id)) return { state: 'checking', text: 'Checking...', disabled: true };
-  return { state: 'ready', text: 'Add to Sonarr', disabled: false };
+function libraryStateForItem(item) {
+  const manager = managerForItem(item);
+  const label = manager === 'radarr' ? 'Radarr' : 'Sonarr';
+  const statusMap = statusMapForItem(item);
+  const loading = libraryLoadingForItem(item);
+  const configured = libraryConfiguredForItem(item);
+
+  if (addingIds.has(item.id)) return { state: 'adding', text: `Adding to ${label}...`, disabled: true, manager };
+  const known = statusMap.get(item.id);
+  if (item.sonarrAdded || item.radarrAdded || known?.inLibrary) return { state: 'added', text: `Already in ${label}`, disabled: true, manager };
+  if (!configured) return { state: 'unconfigured', text: `${label} not set`, disabled: true, manager };
+  if (loading && !statusMap.has(item.id)) return { state: 'checking', text: 'Checking...', disabled: true, manager };
+  return { state: 'ready', text: `Add to ${label}`, disabled: false, manager };
 }
 
 function setButtonState(addBtn, resultEl, item) {
-  const state = sonarrStateForItem(item);
+  const state = libraryStateForItem(item);
   addBtn.disabled = state.disabled;
   addBtn.classList.toggle('is-added', state.state === 'added');
   addBtn.classList.toggle('is-loading', state.state === 'checking' || state.state === 'adding');
+  addBtn.classList.toggle('is-radarr', state.manager === 'radarr');
+  addBtn.classList.toggle('is-sonarr', state.manager === 'sonarr');
   addBtn.textContent = state.text;
-  resultEl.textContent = item.sonarrAdded || state.state === 'added'
-    ? 'Already in Sonarr'
-    : state.state === 'checking'
-      ? 'Waiting for Sonarr data...'
-      : '';
+  resultEl.textContent = '';
 }
 
 function renderItems() {
@@ -402,18 +658,43 @@ function renderItems() {
     addBtn.addEventListener('click', async (event) => {
       event.stopPropagation();
       if (addBtn.disabled) return;
+
+      const manager = managerForItem(item);
+      const endpoint = manager === 'radarr' ? '/api/radarr/add' : '/api/sonarr/add';
+
+      let addSucceeded = false;
       addingIds.add(item.id);
       renderVisibleView();
+
       try {
-        const response = await fetch('/api/sonarr/add', {
+        const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ anime: item }),
+          body: JSON.stringify({ anime: item, movie: item }),
         });
-        const data = await response.json();
-        if (!response.ok || !data.ok) throw new Error(data.error || 'Sonarr add failed');
-        item.sonarrAdded = true;
-        if (data.result?.id) {
+
+        const api = await readApiResponse(response);
+        const data = api.data || {};
+
+        if (!api.ok || !data.ok) {
+          pushSonarrLog({
+            message: `Add failed for ${titleFor(item)}`,
+            payload: {
+              status: api.status,
+              response: data,
+            },
+          });
+          result.textContent = data.message || data.error || `Error: ${managerLabelForItem(item)} add failed`;
+          return;
+        }
+
+        addSucceeded = true;
+
+        if (manager === 'radarr') item.radarrAdded = true;
+        else item.sonarrAdded = true;
+
+        const library = manager === 'radarr' ? radarrLibrary : sonarrLibrary;
+        if (data.result?.id && library?.series) {
           const addedSeries = {
             id: data.result.id,
             title: data.result.title || titleFor(item),
@@ -422,17 +703,29 @@ function renderItems() {
             titleSlug: data.result.titleSlug ?? null,
             year: data.result.year ?? item.startDate?.year ?? null,
           };
-          if (sonarrLibrary?.series) {
-            sonarrLibrary.series = [addedSeries, ...sonarrLibrary.series];
-            sonarrLibrary.index = buildSonarrIndex(sonarrLibrary.series);
-          }
+          library.series = [addedSeries, ...library.series];
+          library.index = buildSonarrIndex(library.series);
         }
-        await refreshSonarrStatuses();
+
+        pushSonarrLog({
+          message: `Added to ${managerLabelForItem(item)}: ${titleFor(item)}`,
+          payload: {
+            status: api.status,
+            response: data,
+          },
+        });
+        result.textContent = `Added to ${managerLabelForItem(item)}`;
       } catch (error) {
+        pushSonarrLog({
+          message: `Unexpected add error for ${titleFor(item)}`,
+          payload: { error: String(error.message || error) },
+        });
         result.textContent = `Error: ${error.message}`;
       } finally {
         addingIds.delete(item.id);
-        await refreshSonarrStatuses();
+        if (addSucceeded) {
+          await refreshLibraryStatuses();
+        }
       }
     });
 
@@ -458,15 +751,19 @@ function renderDetail(item, { loading = false } = {}) {
   detailPoster.alt = item ? `${titleText} poster` : 'Poster';
   detailMeta.textContent = item
     ? [item.format, item.episodes ? `${item.episodes} eps` : null, `Score ${scoreFor(item)}`, `Popularity ${item.popularity?.toLocaleString?.() ?? item.popularity}`]
-        .filter(Boolean)
-        .join(' • ')
+      .filter(Boolean)
+      .join(' • ')
     : loading
       ? 'Loading details...'
       : '';
 
   detailAiring.textContent = item ? airingLabel(item) : '';
-  const sonarrState = item ? sonarrStateForItem(item) : { state: 'checking', text: 'Checking...', disabled: true };
-  detailSonarrState.textContent = meta?.sonarrConfigured ? (sonarrLibraryLoading && !item?.sonarrAdded ? 'Checking Sonarr...' : (sonarrState.state === 'added' ? 'Already in Sonarr' : 'Ready to add')) : 'Sonarr not configured';
+  const sonarrState = item ? libraryStateForItem(item) : { state: 'checking', text: 'Checking...', disabled: true };
+  detailSonarrState.textContent = item
+    ? (sonarrState.state === 'added'
+      ? `Already in ${managerLabelForItem(item)}`
+      : `Ready to add to ${managerLabelForItem(item)}`)
+    : 'Sonarr not configured';
 
   const description = cleanHtml(item?.description || '');
   detailDescription.textContent = description || (loading ? 'Loading details...' : 'No description available.');
@@ -482,7 +779,7 @@ function renderDetail(item, { loading = false } = {}) {
   const sourceText = item?.source || '—';
   const statusTextValue = item?.status || '—';
   const nextAiring = item?.nextAiringEpisode
-    ? `Episode ${item.nextAiringEpisode.episode} in ${formatCountdown(Math.max(0, Math.round(item.nextAiringEpisode.timeUntilAiring / 60)))}`
+    ? `Episode ${item.nextAiringEpisode.episode} in ${formatCountdown(Math.max(0, Math.ceil(item.nextAiringEpisode.timeUntilAiring / 60)))}`
     : '—';
 
   detailStats.innerHTML = '';
@@ -505,12 +802,14 @@ function renderDetail(item, { loading = false } = {}) {
     detailStats.appendChild(row);
   }
 
-  const state = item ? sonarrStateForItem(item) : null;
+  const state = item ? libraryStateForItem(item) : null;
   detailAddBtn.disabled = loading || !item || state?.disabled;
   detailAddBtn.classList.toggle('is-added', state?.state === 'added');
   detailAddBtn.classList.toggle('is-loading', state?.state === 'checking' || state?.state === 'adding' || loading);
-  detailAddBtn.textContent = state?.state === 'added' ? 'Added' : state?.state === 'adding' ? 'Adding...' : 'Add to Sonarr';
-  detailResult.textContent = item ? (item.sonarrAdded || state?.state === 'added' ? 'Already in Sonarr' : state?.state === 'checking' ? 'Waiting for Sonarr data...' : '') : '';
+  detailAddBtn.classList.toggle('is-radarr', state?.manager === 'radarr');
+  detailAddBtn.classList.toggle('is-sonarr', state?.manager === 'sonarr');
+  detailAddBtn.textContent = state?.text || 'Add';
+  detailResult.textContent = '';
 }
 
 function renderVisibleView() {
@@ -521,38 +820,54 @@ function renderVisibleView() {
   }
 }
 
-function recomputeSonarrStatuses() {
-  if (!sonarrLibrary) {
-    sonarrStatusMap = new Map();
-    renderVisibleView();
-    return;
-  }
+function recomputeLibraryStatuses() {
+  const nextSonarrMap = new Map();
+  const nextRadarrMap = new Map();
 
-  const nextMap = new Map();
   for (const item of items) {
-    const match = getSonarrMatch(item);
-    nextMap.set(item.id, {
-      animeId: item.id,
-      inSonarr: Boolean(match),
-      matchedTitle: match?.title || null,
-      sonarrSeriesId: match?.id ?? null,
-      sonarrTvdbId: match?.tvdbId ?? null,
+    const sonarrMatch = sonarrLibrary ? getSonarrMatch(item) : null;
+    const radarrMatch = radarrLibrary ? getRadarrMatch(item) : null;
+
+    nextSonarrMap.set(item.id, {
+      inLibrary: Boolean(sonarrMatch),
+      matchedTitle: sonarrMatch?.title || null,
+      libraryId: sonarrMatch?.id ?? null,
+      tvdbId: sonarrMatch?.tvdbId ?? null,
+    });
+
+    nextRadarrMap.set(item.id, {
+      inLibrary: Boolean(radarrMatch),
+      matchedTitle: radarrMatch?.title || null,
+      libraryId: radarrMatch?.id ?? null,
+      tvdbId: radarrMatch?.tvdbId ?? null,
     });
   }
-  sonarrStatusMap = nextMap;
+
+  sonarrStatusMap = nextSonarrMap;
+  radarrStatusMap = nextRadarrMap;
   renderVisibleView();
 }
 
-async function refreshSonarrStatuses() {
-  recomputeSonarrStatuses();
+async function refreshLibraryStatuses() {
+  recomputeLibraryStatuses();
 }
 
 async function loadMeta() {
   const response = await fetch('/api/meta');
   meta = await response.json();
-  currentFilters = { ...meta };
-  seasonSelect.value = meta.season;
-  yearInput.value = meta.seasonYear;
+
+  const fallback = getCurrentSeason();
+  currentFilters = {
+    season: meta?.season || fallback.season,
+    seasonYear: Number(meta?.seasonYear || fallback.seasonYear),
+    type: 'ALL',
+    sonarrState: 'ALL',
+  };
+
+  seasonSelect.value = currentFilters.season;
+  yearInput.value = String(currentFilters.seasonYear);
+  typeSelect.value = 'ALL';
+  syncSonarrFilterButtons();
   updateQuickButtons();
   syncSelectionSummary();
 }
@@ -590,11 +905,51 @@ async function loadSonarrLibrary() {
     .finally(() => {
       sonarrLibraryLoading = false;
       sonarrLibraryPromise = null;
-      recomputeSonarrStatuses();
+      recomputeLibraryStatuses();
       updateStatusLine();
     });
 
   return sonarrLibraryPromise;
+}
+
+async function loadRadarrLibrary() {
+  if (!meta?.radarrConfigured) {
+    radarrLibraryLoading = false;
+    updateStatusLine();
+    return null;
+  }
+
+  if (radarrLibraryPromise) return radarrLibraryPromise;
+
+  radarrLibraryLoading = true;
+  radarrLibraryError = null;
+  updateStatusLine();
+
+  radarrLibraryPromise = fetch('/api/radarr/library')
+    .then(async (response) => {
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Failed to load Radarr library');
+      const series = Array.isArray(data.series) ? data.series : [];
+      radarrLibrary = {
+        series,
+        fetchedAt: data.fetchedAt || Date.now(),
+        index: buildSonarrIndex(series),
+      };
+      return radarrLibrary;
+    })
+    .catch((error) => {
+      radarrLibraryError = error.message;
+      radarrLibrary = null;
+      throw error;
+    })
+    .finally(() => {
+      radarrLibraryLoading = false;
+      radarrLibraryPromise = null;
+      recomputeLibraryStatuses();
+      updateStatusLine();
+    });
+
+  return radarrLibraryPromise;
 }
 
 async function fetchAnime(reset = false) {
@@ -611,18 +966,29 @@ async function fetchAnime(reset = false) {
       addingIds = new Set();
     }
 
+    const fallback = getCurrentSeason();
+    const season = currentFilters.season || fallback.season;
+    const seasonYear = Number(currentFilters.seasonYear || fallback.seasonYear);
+
     const params = new URLSearchParams({
       page: String(page),
       perPage: '20',
       sort: activeSort,
-      season: currentFilters.season,
-      seasonYear: String(currentFilters.seasonYear),
+      season,
+      seasonYear: String(seasonYear),
     });
     const response = await fetch(`/api/anime?${params}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to load anime');
 
-    items = items.concat((data.media || []).map((item) => ({ ...item, sonarrAdded: false })));
+    const nextItems = (data.media || []).map((item) => ({ ...item, sonarrAdded: false }));
+    const merged = reset ? nextItems : items.concat(nextItems);
+    const deduped = new Map();
+    for (const item of merged) {
+      if (!deduped.has(item.id)) deduped.set(item.id, item);
+    }
+    items = [...deduped.values()];
+
     hasNextPage = Boolean(data.pageInfo?.hasNextPage);
     page += 1;
     renderVisibleView();
@@ -631,7 +997,7 @@ async function fetchAnime(reset = false) {
     loadMoreBtn.textContent = hasNextPage ? 'Load more' : 'No more results';
 
     if (sonarrLibrary) {
-      recomputeSonarrStatuses();
+      recomputeLibraryStatuses();
     } else if (meta?.sonarrConfigured && !sonarrLibraryPromise) {
       void loadSonarrLibrary();
     } else {
@@ -709,8 +1075,8 @@ quickSeasonButtons.forEach((button) => {
     const current = getCurrentSeason();
     const nextFilters =
       mode === 'previous' ? shiftSeason(current, -1)
-      : mode === 'next' ? shiftSeason(current, 1)
-      : current;
+        : mode === 'next' ? shiftSeason(current, 1)
+          : current;
     setFilters(nextFilters, { closeAdvanced: false });
   });
 });
@@ -732,7 +1098,12 @@ sortChips.addEventListener('click', (event) => {
 
 loadMoreBtn.addEventListener('click', () => fetchAnime(false));
 refreshBtn.addEventListener('click', async () => {
-  await loadSonarrLibrary().catch(() => null);
+  if (meta?.sonarrConfigured) {
+    await loadSonarrLibrary().catch(() => null);
+  }
+  if (meta?.radarrConfigured) {
+    await loadRadarrLibrary().catch(() => null);
+  }
   fetchAnime(true);
 });
 
@@ -744,18 +1115,48 @@ backBtn.addEventListener('click', () => {
 detailAddBtn.addEventListener('click', async () => {
   const item = currentDetailAnime;
   if (!item || detailAddBtn.disabled) return;
+
+  const manager = managerForItem(item);
+  const endpoint = manager === 'radarr' ? '/api/radarr/add' : '/api/sonarr/add';
+
+  let addSucceeded = false;
   addingIds.add(item.id);
+  detailResult.textContent = `Checking ${managerLabelForItem(item)} match...`;
+  pushSonarrLog({
+    message: `Add request started for ${titleFor(item)}`,
+    payload: { animeId: item.id, title: titleFor(item), manager },
+  });
   renderDetail(item, { loading: false });
+
   try {
-    const response = await fetch('/api/sonarr/add', {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anime: item }),
+      body: JSON.stringify({ anime: item, movie: item }),
     });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || 'Sonarr add failed');
-    item.sonarrAdded = true;
+
+    const api = await readApiResponse(response);
+    const data = api.data || {};
+
+    if (!api.ok || !data.ok) {
+      pushSonarrLog({
+        message: `Add failed for ${titleFor(item)}`,
+        payload: {
+          status: api.status,
+          response: data,
+        },
+      });
+      detailResult.textContent = data.message || data.error || `Error: ${managerLabelForItem(item)} add failed`;
+      return;
+    }
+
+    addSucceeded = true;
+
+    if (manager === 'radarr') item.radarrAdded = true;
+    else item.sonarrAdded = true;
+
     if (data.result?.id) {
+      const library = manager === 'radarr' ? radarrLibrary : sonarrLibrary;
       const addedSeries = {
         id: data.result.id,
         title: data.result.title || titleFor(item),
@@ -764,17 +1165,31 @@ detailAddBtn.addEventListener('click', async () => {
         titleSlug: data.result.titleSlug ?? null,
         year: data.result.year ?? item.startDate?.year ?? null,
       };
-      if (sonarrLibrary?.series) {
-        sonarrLibrary.series = [addedSeries, ...sonarrLibrary.series];
-        sonarrLibrary.index = buildSonarrIndex(sonarrLibrary.series);
+      if (library?.series) {
+        library.series = [addedSeries, ...library.series];
+        library.index = buildSonarrIndex(library.series);
       }
     }
-    detailResult.textContent = 'Added to Sonarr';
+
+    pushSonarrLog({
+      message: `Added to ${managerLabelForItem(item)}: ${titleFor(item)}`,
+      payload: {
+        status: api.status,
+        response: data,
+      },
+    });
+    detailResult.textContent = `Added to ${managerLabelForItem(item)}`;
   } catch (error) {
+    pushSonarrLog({
+      message: `Unexpected add error for ${titleFor(item)}`,
+      payload: { error: String(error.message || error) },
+    });
     detailResult.textContent = `Error: ${error.message}`;
   } finally {
     addingIds.delete(item.id);
-    await refreshSonarrStatuses();
+    if (addSucceeded) {
+      await refreshLibraryStatuses();
+    }
   }
 });
 
@@ -787,6 +1202,27 @@ seasonSelect.addEventListener('change', () => {
 });
 yearInput.addEventListener('change', () => {
   setFilters({ season: seasonSelect.value, seasonYear: Number(yearInput.value) }, { closeAdvanced: false });
+});
+
+sonarrInfoBtn?.addEventListener('click', () => {
+  if (!sonarrLogDialog) return;
+  if (typeof sonarrLogDialog.showModal === 'function') sonarrLogDialog.showModal();
+});
+
+sonarrLogClose?.addEventListener('click', () => {
+  if (sonarrLogDialog?.open) sonarrLogDialog.close();
+});
+
+typeSelect.addEventListener('change', () => {
+  void setFilters({ type: typeSelect.value }, { closeAdvanced: false });
+});
+
+sonarrInBtn.addEventListener('click', () => {
+  void setSonarrFilter(currentFilters.sonarrState === 'IN' ? 'ALL' : 'IN');
+});
+
+sonarrOutBtn.addEventListener('click', () => {
+  void setSonarrFilter(currentFilters.sonarrState === 'OUT' ? 'ALL' : 'OUT');
 });
 
 function setupLoadMoreObserver() {
@@ -811,14 +1247,19 @@ window.addEventListener('hashchange', handleRoute);
 
 (async () => {
   await loadMeta();
-  currentFilters = getCurrentSeason();
-  seasonSelect.value = currentFilters.season;
-  yearInput.value = String(currentFilters.seasonYear);
   advancedPanel.hidden = true;
   moreToggleBtn.setAttribute('aria-expanded', 'false');
   updateQuickButtons();
   setupLoadMoreObserver();
-  void loadSonarrLibrary();
+
+  if (meta?.sonarrConfigured) {
+    await loadSonarrLibrary().catch(() => null);
+  }
+  if (meta?.radarrConfigured) {
+    await loadRadarrLibrary().catch(() => null);
+  }
+
+  updateStatusLine();
   await fetchAnime(true);
   handleRoute();
 })();

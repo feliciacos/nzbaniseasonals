@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import http from 'http';
 import fs from 'fs';
 import fsp from 'fs/promises';
@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, 'public');
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 let fileConfig = {};
 
@@ -25,8 +26,14 @@ const config = {
   sonarrApiKey: process.env.SONARR_API_KEY || fileConfig.sonarrApiKey,
   sonarrQualityProfileId: Number(process.env.SONARR_QUALITY_PROFILE_ID || fileConfig.sonarrQualityProfileId || 1),
   sonarrRootFolderPath: process.env.SONARR_ROOT_FOLDER_PATH || fileConfig.sonarrRootFolderPath,
-  sonarrMonitorNewItems: process.env.SONARR_MONITOR_NEW_ITEMS || fileConfig.sonarrMonitorNewItems || "all",
-  sonarrSeasonFolder: (process.env.SONARR_SEASON_FOLDER ?? fileConfig.sonarrSeasonFolder ?? true) === "true"
+  sonarrMonitorNewItems: process.env.SONARR_MONITOR_NEW_ITEMS || fileConfig.sonarrMonitorNewItems || 'all',
+  sonarrSeasonFolder: (process.env.SONARR_SEASON_FOLDER ?? fileConfig.sonarrSeasonFolder ?? true) === 'true',
+
+  radarrUrl: process.env.RADARR_URL || fileConfig.radarrUrl,
+  radarrApiKey: process.env.RADARR_API_KEY || fileConfig.radarrApiKey,
+  radarrQualityProfileId: Number(process.env.RADARR_QUALITY_PROFILE_ID || fileConfig.radarrQualityProfileId || 1),
+  radarrRootFolderPath: process.env.RADARR_ROOT_FOLDER_PATH || fileConfig.radarrRootFolderPath,
+  radarrMonitorNewItems: process.env.RADARR_MONITOR_NEW_ITEMS || fileConfig.radarrMonitorNewItems || 'all',
 };
 
 if (!config.sonarrUrl || !config.sonarrApiKey) {
@@ -58,6 +65,21 @@ const sonarrCache = {
 };
 
 const sonarrAuxCache = {
+  key: null,
+  fetchedAt: 0,
+  rootFolders: [],
+  qualityProfiles: [],
+  promise: null,
+};
+
+const radarrCache = {
+  key: null,
+  fetchedAt: 0,
+  series: [],
+  promise: null,
+};
+
+const radarrAuxCache = {
   key: null,
   fetchedAt: 0,
   rootFolders: [],
@@ -177,6 +199,19 @@ query ($id: Int) {
       name
       rank
     }
+    relations {
+      edges {
+        relationType
+        node {
+          id
+          title {
+            romaji
+            english
+            native
+          }
+        }
+      }
+    }
     nextAiringEpisode {
       episode
       timeUntilAiring
@@ -266,6 +301,45 @@ function animeTitleVariants(anime) {
   return [...keys];
 }
 
+function normalizeFranchiseTitle(value = '') {
+  return normalizeText(String(value))
+    .replace(/\b(1st|2nd|3rd|4th|\d+(st|nd|rd|th))\s+stage\b/gi, '')
+    .replace(/\bseason\s*\d+\b/gi, '')
+    .replace(/\bpart\s*\d+\b/gi, '')
+    .replace(/\s*[:\-–—]\s*.*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getSonarrFamilyTitles(anime) {
+  const titles = new Set(animeTitleVariants(anime));
+
+  const relations = anime?.relations?.edges || [];
+  for (const edge of relations) {
+    const relationType = String(edge?.relationType || '').toUpperCase();
+
+    if (!['SEQUEL', 'PREQUEL', 'PARENT', 'SIDE_STORY', 'ADAPTATION'].includes(relationType)) {
+      continue;
+    }
+
+    const node = edge?.node;
+    if (!node) continue;
+
+    const relatedTitles = [
+      node?.title?.romaji,
+      node?.title?.english,
+      node?.title?.native,
+    ].filter(Boolean);
+
+    for (const title of relatedTitles) {
+      titles.add(normalizeText(title));
+      titles.add(normalizeFranchiseTitle(title));
+    }
+  }
+
+  return [...titles].filter(Boolean);
+}
+
 function sameYearOrUnknown(left, right) {
   if (!left || !right) return true;
   return Math.abs(Number(left) - Number(right)) <= 1;
@@ -295,11 +369,13 @@ async function readBody(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
-async function sonarrRequest(config, urlPath, options = {}) {
-  const base = String(config.sonarrUrl || '').replace(/\/$/, '');
-  const apiKey = config.sonarrApiKey;
+async function apiRequest(baseUrl, apiKey, urlPath, options = {}) {
+  const base = String(baseUrl || '')
+    .replace(/\/$/, '')
+    .replace(/\/api\/v3$/, '');
+
   if (!base || !apiKey) {
-    throw new Error('Sonarr is not configured yet. Add sonarrUrl and sonarrApiKey to config.json.');
+    throw new Error('API is not configured yet. Check base URL and API key.');
   }
 
   const response = await fetch(`${base}${urlPath}`, {
@@ -320,10 +396,18 @@ async function sonarrRequest(config, urlPath, options = {}) {
   }
 
   if (!response.ok) {
-    throw new Error(typeof payload === 'string' ? payload : payload?.message || `Sonarr request failed (${response.status})`);
+    throw new Error(typeof payload === 'string' ? payload : payload?.message || `Request failed (${response.status})`);
   }
 
   return payload;
+}
+
+async function sonarrRequest(config, urlPath, options = {}) {
+  return apiRequest(config.sonarrUrl, config.sonarrApiKey, urlPath, options);
+}
+
+async function radarrRequest(config, urlPath, options = {}) {
+  return apiRequest(config.radarrUrl, config.radarrApiKey, urlPath, options);
 }
 
 function buildAddPayload(candidate, config, setup = {}) {
@@ -343,9 +427,9 @@ function buildAddPayload(candidate, config, setup = {}) {
 
   payload.seasons = Array.isArray(candidate.seasons)
     ? candidate.seasons.map((season) => ({
-        seasonNumber: season.seasonNumber,
-        monitored: season.monitored ?? true,
-      }))
+      seasonNumber: season.seasonNumber,
+      monitored: season.monitored ?? true,
+    }))
     : [];
 
   payload.addOptions = {
@@ -355,8 +439,6 @@ function buildAddPayload(candidate, config, setup = {}) {
 
   return payload;
 }
-
-
 
 async function loadSonarrSetup(config, { forceRefresh = false } = {}) {
   const key = `${String(config.sonarrUrl || '')}::${String(config.sonarrApiKey || '')}`;
@@ -397,6 +479,129 @@ async function loadSonarrSetup(config, { forceRefresh = false } = {}) {
   } finally {
     if (sonarrAuxCache.promise === promise) sonarrAuxCache.promise = null;
   }
+}
+
+async function loadRadarrSetup(config, { forceRefresh = false } = {}) {
+  const key = `${String(config.radarrUrl || '')}::${String(config.radarrApiKey || '')}`;
+  const now = Date.now();
+
+  if (!forceRefresh && radarrAuxCache.key === key && radarrAuxCache.rootFolders.length && radarrAuxCache.qualityProfiles.length && now - radarrAuxCache.fetchedAt < SONARR_CACHE_TTL_MS) {
+    return {
+      rootFolders: radarrAuxCache.rootFolders,
+      qualityProfiles: radarrAuxCache.qualityProfiles,
+      cached: true,
+      fetchedAt: radarrAuxCache.fetchedAt,
+    };
+  }
+
+  if (!forceRefresh && radarrAuxCache.promise && radarrAuxCache.key === key) {
+    return radarrAuxCache.promise;
+  }
+
+  const promise = (async () => {
+    const [rootFolders, qualityProfiles] = await Promise.all([
+      radarrRequest(config, '/api/v3/rootfolder'),
+      radarrRequest(config, '/api/v3/qualityprofile'),
+    ]);
+
+    const folders = Array.isArray(rootFolders) ? rootFolders : [];
+    const profiles = Array.isArray(qualityProfiles) ? qualityProfiles : [];
+    radarrAuxCache.key = key;
+    radarrAuxCache.rootFolders = folders;
+    radarrAuxCache.qualityProfiles = profiles;
+    radarrAuxCache.fetchedAt = Date.now();
+    return { rootFolders: folders, qualityProfiles: profiles, cached: false, fetchedAt: radarrAuxCache.fetchedAt };
+  })();
+
+  radarrAuxCache.key = key;
+  radarrAuxCache.promise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (radarrAuxCache.promise === promise) radarrAuxCache.promise = null;
+  }
+}
+
+function pickDefaultRadarrRootFolder(config, rootFolders) {
+  const preferred = String(config.radarrRootFolderPath || '').trim();
+  const folders = Array.isArray(rootFolders) ? rootFolders : [];
+  const preferredKey = normalizeFolderPath(preferred);
+  if (preferredKey) {
+    const exact = folders.find((folder) => normalizeFolderPath(folder?.path) === preferredKey);
+    if (exact?.path) return exact.path;
+  }
+
+  const movieFolder = folders.find((folder) => {
+    const key = normalizeFolderPath(folder?.path);
+    return key.includes('movie') && !key.includes('anime');
+  }) || folders.find((folder) => normalizeFolderPath(folder?.path).includes('movie'));
+
+  if (movieFolder?.path) return movieFolder.path;
+  return folders.find((folder) => folder?.path)?.path || preferred || '';
+}
+
+function buildRadarrAddPayload(candidate, config, setup = {}) {
+  const rootFolderPath = pickDefaultRadarrRootFolder(config, setup.rootFolders);
+  const qualityProfileId = pickDefaultQualityProfile(config, setup.qualityProfiles);
+
+  return {
+    ...candidate,
+    ...(qualityProfileId ? { qualityProfileId: Number(qualityProfileId) } : {}),
+    ...(rootFolderPath ? { rootFolderPath: String(rootFolderPath).replace(/[\/]+$/g, '') } : {}),
+    monitored: true,
+    minimumAvailability: candidate.minimumAvailability || 'released',
+    addOptions: {
+      ...(candidate.addOptions || {}),
+      searchForMovie: true,
+    },
+  };
+}
+
+async function loadRadarrLibrary(config, { forceRefresh = false } = {}) {
+  const key = `${String(config.radarrUrl || '')}::${String(config.radarrApiKey || '')}`;
+  const now = Date.now();
+
+  if (!forceRefresh && radarrCache.key === key && radarrCache.series.length && now - radarrCache.fetchedAt < SONARR_CACHE_TTL_MS) {
+    return { series: radarrCache.series, index: buildSonarrIndex(radarrCache.series), cached: true, fetchedAt: radarrCache.fetchedAt };
+  }
+
+  if (!forceRefresh && radarrCache.promise && radarrCache.key === key) {
+    return radarrCache.promise;
+  }
+
+  const promise = (async () => {
+    const movies = await radarrRequest(config, '/api/v3/movie');
+    const list = Array.isArray(movies) ? movies : [];
+    radarrCache.key = key;
+    radarrCache.series = list;
+    radarrCache.fetchedAt = Date.now();
+    return { series: list, index: buildSonarrIndex(list), cached: false, fetchedAt: radarrCache.fetchedAt };
+  })();
+
+  radarrCache.key = key;
+  radarrCache.promise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (radarrCache.promise === promise) {
+      radarrCache.promise = null;
+    }
+  }
+}
+
+function getRadarrMatchForMovie(movie, library) {
+  const { match, confidence } = findBestSeriesMatch(movie, library.index);
+  const title = pickTitle(movie);
+
+  return {
+    movieId: movie.id,
+    title,
+    inRadarr: Boolean(match),
+    matchConfidence: match ? confidence : 'none',
+    radarrMovieId: match?.id ?? null,
+    matchedTitle: match?.title ?? null,
+    matchedPath: match?.path ?? null,
+  };
 }
 
 function pickDefaultRootFolder(config, rootFolders) {
@@ -554,21 +759,115 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (url.pathname === '/api/meta') {
-    const { season, seasonYear } = currentSeasonParts();
-    let sonarrRootFolderPath = String(config.sonarrRootFolderPath || config.sonarrAnimeRootFolderPath || '').trim();
-    if (config.sonarrUrl && config.sonarrApiKey) {
-      try {
-        const setup = await loadSonarrSetup(config);
-        sonarrRootFolderPath = pickDefaultRootFolder(config, setup.rootFolders) || sonarrRootFolderPath;
-      } catch {}
+  if (url.pathname === '/api/radarr/library' && req.method === 'GET') {
+    try {
+      const library = await loadRadarrLibrary(config, { forceRefresh: url.searchParams.get('refresh') === '1' });
+      json(res, 200, {
+        ok: true,
+        count: library.index.count,
+        fetchedAt: library.fetchedAt,
+        cached: library.cached,
+        series: library.series.map((movie) => ({
+          id: movie.id,
+          tvdbId: movie.tvdbId ?? null,
+          title: movie.title ?? null,
+          sortTitle: movie.sortTitle ?? null,
+          titleSlug: movie.titleSlug ?? null,
+          alternateTitles: Array.isArray(movie.alternateTitles)
+            ? movie.alternateTitles.map((alt) => ({ title: typeof alt === 'string' ? alt : alt?.title ?? null })).filter((alt) => alt.title)
+            : [],
+          year: movie.year ?? null,
+        })),
+      });
+    } catch (error) {
+      json(res, 500, { ok: false, error: String(error.message || error) });
     }
-    json(res, 200, {
-      season,
-      seasonYear,
-      sonarrConfigured: Boolean(config.sonarrUrl && config.sonarrApiKey),
-      sonarrRootFolderPath: sonarrRootFolderPath || null,
-    });
+    return;
+  }
+
+  if (url.pathname === '/api/radarr/add' && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      const movie = body?.anime || body?.movie;
+      if (!movie) throw new Error('Missing movie payload.');
+
+      const title = pickTitle(movie);
+      const library = await loadRadarrLibrary(config);
+      const { match } = findBestSeriesMatch(movie, library.index);
+      if (match) {
+        json(res, 200, { ok: true, alreadyExists: true, series: match });
+        return;
+      }
+
+      const setup = await loadRadarrSetup(config);
+      const resolvedRootFolder = pickDefaultRadarrRootFolder(config, setup.rootFolders);
+      const lookupTerms = [...new Set([title, ...animeTitleVariants(movie)])].filter(Boolean);
+      let candidates = [];
+      for (const term of lookupTerms) {
+        const lookup = await radarrRequest(config, `/api/v3/movie/lookup?term=${encodeURIComponent(term)}`);
+        const next = Array.isArray(lookup) ? lookup : [];
+        if (next.length) {
+          candidates = next;
+          break;
+        }
+      }
+
+      if (!candidates.length) {
+        throw new Error(`No Radarr lookup results for ${title}`);
+      }
+
+      const exactLookup = candidates.find((candidate) => {
+        const candidateVariants = [
+          normalizeText(candidate?.title),
+          normalizeText(candidate?.sortTitle),
+          normalizePath(candidate?.titleSlug),
+          stripAnimeSuffixes(candidate?.title),
+          stripAnimeSuffixes(candidate?.sortTitle),
+          stripAnimeSuffixes(candidate?.titleSlug),
+          ...(Array.isArray(candidate?.alternateTitles)
+            ? candidate.alternateTitles.map((alt) => normalizeText(typeof alt === 'string' ? alt : alt?.title)).filter(Boolean)
+            : []),
+          ...(Array.isArray(candidate?.alternateTitles)
+            ? candidate.alternateTitles.map((alt) => stripAnimeSuffixes(typeof alt === 'string' ? alt : alt?.title)).filter(Boolean)
+            : []),
+        ].filter(Boolean);
+        return animeTitleVariants(movie).some((variant) => candidateVariants.includes(variant));
+      });
+
+      if (!exactLookup) {
+        return json(res, 200, {
+          ok: false,
+          reason: 'NO_EXACT_MATCH',
+          message: `No exact Radarr match found for "${title}"`,
+          lookupTerms,
+          lookupResults: candidates.slice(0, 5).map((candidate) => ({
+            title: candidate?.title || null,
+            sortTitle: candidate?.sortTitle || null,
+            titleSlug: candidate?.titleSlug || null,
+            year: candidate?.year || null,
+            tvdbId: candidate?.tvdbId || null,
+          })),
+        });
+      }
+
+      const payload = buildRadarrAddPayload(exactLookup, { ...config, radarrRootFolderPath: resolvedRootFolder || config.radarrRootFolderPath }, setup);
+      const result = await radarrRequest(config, '/api/v3/movie', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+
+      radarrCache.fetchedAt = 0;
+      radarrCache.series = [];
+      json(res, 200, {
+        ok: true,
+        alreadyExists: false,
+        result,
+        rootFolderPath: payload.rootFolderPath,
+        qualityProfileId: payload.qualityProfileId,
+      });
+    } catch (error) {
+      json(res, 500, { ok: false, error: String(error.message || error) });
+    }
     return;
   }
 
@@ -697,14 +996,70 @@ async function handleApi(req, res, url) {
           stripAnimeSuffixes(candidate?.title),
           stripAnimeSuffixes(candidate?.sortTitle),
           stripAnimeSuffixes(candidate?.titleSlug),
-          ...(Array.isArray(candidate?.alternateTitles) ? candidate.alternateTitles.map((alt) => normalizeText(typeof alt === 'string' ? alt : alt?.title)).filter(Boolean) : []),
-          ...(Array.isArray(candidate?.alternateTitles) ? candidate.alternateTitles.map((alt) => stripAnimeSuffixes(typeof alt === 'string' ? alt : alt?.title)).filter(Boolean) : []),
+          ...(Array.isArray(candidate?.alternateTitles)
+            ? candidate.alternateTitles
+              .map((alt) => normalizeText(typeof alt === 'string' ? alt : alt?.title))
+              .filter(Boolean)
+            : []),
+          ...(Array.isArray(candidate?.alternateTitles)
+            ? candidate.alternateTitles
+              .map((alt) => stripAnimeSuffixes(typeof alt === 'string' ? alt : alt?.title))
+              .filter(Boolean)
+            : []),
         ].filter(Boolean);
         return animeTitleVariants(anime).some((variant) => candidateVariants.includes(variant));
       });
 
-      const candidate = exactLookup || candidates[0];
-      const payload = buildAddPayload(candidate, { ...config, sonarrRootFolderPath: resolvedRootFolder || config.sonarrRootFolderPath }, setup);
+      if (!exactLookup) {
+        const familyTitles = getSonarrFamilyTitles(anime);
+
+        const relatedExistingSeries = library.series.find((series) => {
+          const seriesTitles = [
+            series?.title,
+            series?.sortTitle,
+            series?.titleSlug,
+            ...(Array.isArray(series?.alternateTitles)
+              ? series.alternateTitles.map((alt) => (typeof alt === 'string' ? alt : alt?.title)).filter(Boolean)
+              : []),
+          ]
+            .map((title) => normalizeFranchiseTitle(title))
+            .filter(Boolean);
+
+          return familyTitles.some((familyTitle) =>
+            seriesTitles.includes(normalizeFranchiseTitle(familyTitle))
+          );
+        });
+
+        if (relatedExistingSeries) {
+          return json(res, 200, {
+            ok: true,
+            alreadyExists: true,
+            reason: 'RELATED_SERIES_EXISTS',
+            message: `Already represented in Sonarr by "${relatedExistingSeries.title}"`,
+            matchedSeries: {
+              title: relatedExistingSeries.title,
+              tvdbId: relatedExistingSeries.tvdbId ?? null,
+              sortTitle: relatedExistingSeries.sortTitle ?? null,
+              titleSlug: relatedExistingSeries.titleSlug ?? null,
+            },
+          });
+        }
+
+        return json(res, 200, {
+          ok: false,
+          reason: 'NO_EXACT_MATCH',
+          message: `No exact Sonarr match found for "${title}"`,
+          lookupTerms,
+          lookupResults: candidates.slice(0, 5).map((candidate) => ({
+            title: candidate?.title || null,
+            sortTitle: candidate?.sortTitle || null,
+            titleSlug: candidate?.titleSlug || null,
+            year: candidate?.year || null,
+            tvdbId: candidate?.tvdbId || null,
+          })),
+        });
+      }
+      const payload = buildAddPayload(exactLookup, { ...config, sonarrRootFolderPath: resolvedRootFolder || config.sonarrRootFolderPath }, setup);
       const result = await sonarrRequest(config, '/api/v3/series', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -722,6 +1077,36 @@ async function handleApi(req, res, url) {
     } catch (error) {
       json(res, 500, { ok: false, error: String(error.message || error) });
     }
+    return;
+  }
+
+  if (url.pathname === '/api/meta') {
+    const { season, seasonYear } = currentSeasonParts();
+
+    let sonarrRootFolderPath = String(config.sonarrRootFolderPath || config.sonarrAnimeRootFolderPath || '').trim();
+    if (config.sonarrUrl && config.sonarrApiKey) {
+      try {
+        const setup = await loadSonarrSetup(config);
+        sonarrRootFolderPath = pickDefaultRootFolder(config, setup.rootFolders) || sonarrRootFolderPath;
+      } catch { }
+    }
+
+    let radarrRootFolderPath = String(config.radarrRootFolderPath || '').trim();
+    if (config.radarrUrl && config.radarrApiKey) {
+      try {
+        const setup = await loadRadarrSetup(config);
+        radarrRootFolderPath = pickDefaultRadarrRootFolder(config, setup.rootFolders) || radarrRootFolderPath;
+      } catch { }
+    }
+
+    json(res, 200, {
+      season,
+      seasonYear,
+      sonarrConfigured: Boolean(config.sonarrUrl && config.sonarrApiKey),
+      sonarrRootFolderPath: sonarrRootFolderPath || null,
+      radarrConfigured: Boolean(config.radarrUrl && config.radarrApiKey),
+      radarrRootFolderPath: radarrRootFolderPath || null,
+    });
     return;
   }
 

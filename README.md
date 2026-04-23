@@ -1,7 +1,7 @@
 
 # NZB Anime Seasonal
 
-A local, mobile-first seasonal anime browser that pulls from AniList and lets you add series to Sonarr with one tap.
+A local, mobile-first seasonal anime browser that pulls from AniList and lets you add series to Sonarr and movies to Radarr with one tap.
 
 ---
 
@@ -10,7 +10,9 @@ A local, mobile-first seasonal anime browser that pulls from AniList and lets yo
 - Mobile UI for nzb360 integration
 - Seasonal anime feed (AniList)
 - Search by title, genres, and tags
-- One-click add to Sonarr
+- One-click add to Sonarr (TV)
+- One-click add to Radarr (Movies)
+- Library detection (Sonarr + Radarr)
 
 ---
 
@@ -30,26 +32,42 @@ cd nzbaniseasonals
 Create a file called `.env` in the project root (or rename the .env-example to .env):
 
 ```env
+# Sonarr
 SONARR_URL=http://YOUR_SONARR_IP:8989
 SONARR_API_KEY=YOUR_API_KEY
 SONARR_QUALITY_PROFILE_ID=1
 SONARR_ROOT_FOLDER_PATH=YOUR_SONARR_ROOTFOLDER
 SONARR_MONITOR_NEW_ITEMS=all
 SONARR_SEASON_FOLDER=true
+
+# Radarr
+RADARR_URL=http://YOUR_RADARR_IP:7878
+RADARR_API_KEY=YOUR_API_KEY
+RADARR_QUALITY_PROFILE_ID=1
+RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 ```
 
 ---
 
 ### 🔧 Environment Variables Explained
+## Sonarr
+| Variable                    | Description                      |
+| --------------------------- | -------------------------------- |
+| `SONARR_URL`                | Full URL to your Sonarr instance |
+| `SONARR_API_KEY`            | Your Sonarr API key              |
+| `SONARR_QUALITY_PROFILE_ID` | Quality profile ID               |
+| `SONARR_ROOT_FOLDER_PATH`   | Root folder for anime            |
+| `SONARR_MONITOR_NEW_ITEMS`  | What to monitor                  |
+| `SONARR_SEASON_FOLDER`      | Create season folders            |
 
-| Variable | Description |
-|--------|------------|
-| `SONARR_URL` | Full URL to your Sonarr instance (e.g. `http://x.x.x.x:8989`) |
-| `SONARR_API_KEY` | Your Sonarr API key (Settings → General) |
-| `SONARR_QUALITY_PROFILE_ID` | ID of the quality profile (usually `1` or your custom profile) |
-| `SONARR_ROOT_FOLDER_PATH` | Root folder for anime (e.g. `/data/Anime`) |
-| `SONARR_MONITOR_NEW_ITEMS` | What to monitor (`all`, `future`, etc.) |
-| `SONARR_SEASON_FOLDER` | Whether to create season folders (`true` / `false`) |
+## Radarr
+| Variable                    | Description                      |
+| --------------------------- | -------------------------------- |
+| `RADARR_URL`                | Full URL to your Radarr instance |
+| `RADARR_API_KEY`            | Your Radarr API key              |
+| `RADARR_QUALITY_PROFILE_ID` | Quality profile ID               |
+| `RADARR_ROOT_FOLDER_PATH`   | Root folder for movies           |
+| `RADARR_MONITOR_NEW_ITEMS`  | What to monitor                  |
 
 ---
 
@@ -79,15 +97,15 @@ http://localhost:8787
 ## 🧠 How it works
 
 - Anime data comes from **AniList (GraphQL API)**
-- The app checks your **Sonarr library first**
+- The app checks your Sonarr and Radarr libraries
 - Matching uses:
   - English + Japanese titles
   - Synonyms
-  - Alternate titles from Sonarr
+  - Alternate titles
 - Adding:
-  1. Lookup in Sonarr
+  1. Lookup in Sonarr / Radarr
   2. Select best match
-  3. Send add request to Sonarr
+  3. Send add request
 
 ---
 
@@ -98,4 +116,4 @@ http://localhost:8787
   - Season/year selection
   - Search
   - Sorting
-- Click an anime to open the full details page, shows description and other information, this page also allows adding to Sonarr.
+- Click an anime to open the full details page, shows description and other information, this page also allows adding to Sonarr/Radarr.
