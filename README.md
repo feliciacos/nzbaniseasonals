@@ -5,7 +5,7 @@ A local, mobile-first seasonal anime browser that pulls from AniList and lets yo
 
 ---
 
-## ✨ Features
+## Features
 
 - Mobile UI for nzb360 integration
 - Seasonal anime feed (AniList)
@@ -16,7 +16,7 @@ A local, mobile-first seasonal anime browser that pulls from AniList and lets yo
 
 ---
 
-## 🐳 Quick Start (Docker)
+## Quick Start (Docker)
 
 ### 1. Clone the repo
 
@@ -49,7 +49,7 @@ RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 
 ---
 
-### 🔧 Environment Variables Explained
+### Environment Variables Explained
 ## Sonarr
 | Variable                    | Description                      |
 | --------------------------- | -------------------------------- |
@@ -85,7 +85,7 @@ http://localhost:8787
 
 ---
 
-## 🧪 Development Notes
+## Development Notes
 
 - The project uses a bind mount in Docker → no rebuild needed for changes
 - If something looks outdated:
@@ -94,7 +94,7 @@ http://localhost:8787
 
 ---
 
-## 🧠 How it works
+## How it works
 
 - Anime data comes from **AniList (GraphQL API)**
 - The app checks your Sonarr and Radarr libraries
@@ -109,7 +109,7 @@ http://localhost:8787
 
 ---
 
-## 🧭 Using the Website
+## Using the Website
 
 - Use **Last / Current / Next Season** buttons to browse
 - Click **More** for:
