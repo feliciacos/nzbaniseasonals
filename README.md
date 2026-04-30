@@ -82,7 +82,21 @@ RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 
 ---
 
-### [GetHomepage](https://gethomepage.dev/) YAML example
+### 3. Run with Docker
+
+```bash
+docker compose up --build
+```
+
+---
+
+### 4. Open the app
+
+http://localhost:8787
+
+---
+
+## [GetHomepage](https://gethomepage.dev/) YAML example
 Add below to your services.yaml
 ```yaml
 - NZ Season:
@@ -102,20 +116,6 @@ Add below to your services.yaml
         - field: moviesInRadarr
           label: Movies (Radarr)
 ```
-
-### 3. Run with Docker
-
-```bash
-docker compose up --build
-```
-
----
-
-### 4. Open the app
-
-http://localhost:8787
-
----
 
 ## Development Notes
 
