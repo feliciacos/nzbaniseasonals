@@ -83,23 +83,24 @@ RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 ---
 
 ### [GetHomepage](https://gethomepage.dev/) YAML example
+Add below to your services.yaml
 ```yaml
-        - NZ Season:
-            icon: mdi-calendar
-            widget:
-              type: customapi
-              url: http://IPADRESS_YOU_USE:8787/api/season-stats
-              refreshInterval: 3600
-              display: list
-              mappings:
-                - field: seasonDisplay
-                  label: Season
-                - field: daysLeft
-                  label: Days Left
-                - field: tvInSonarr
-                  label: TV (Sonarr)
-                - field: moviesInRadarr
-                  label: Movies (Radarr)
+- NZ Season:
+    icon: mdi-calendar
+    widget:
+      type: customapi
+      url: http://IPADRESS_YOU_USE:8787/api/season-stats
+      refreshInterval: 3600
+      display: list
+      mappings:
+        - field: seasonDisplay
+          label: Season
+        - field: daysLeft
+          label: Days Left
+        - field: tvInSonarr
+          label: TV (Sonarr)
+        - field: moviesInRadarr
+          label: Movies (Radarr)
 ```
 
 ### 3. Run with Docker
