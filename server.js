@@ -111,6 +111,21 @@ function currentSeasonParts(date = new Date()) {
   return { season: 'WINTER', seasonYear: month === 12 ? year + 1 : year };
 }
 
+function getSeasonDateRange(season, year) {
+  const ranges = {
+    SPRING: { start: `${year}-03-01`, end: `${year}-05-31` },
+    SUMMER: { start: `${year}-06-01`, end: `${year}-08-31` },
+    FALL: { start: `${year}-09-01`, end: `${year}-11-30` },
+    WINTER: { start: `${year}-12-01`, end: `${year + 1}-02-28` },
+  };
+  return ranges[season];
+}
+
+function daysBetween(now, endDate) {
+  const ms = new Date(endDate).getTime() - now.getTime();
+  return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)));
+}
+
 function normalizeSetting(value) {
   return String(value || '')
     .trim()
@@ -785,6 +800,32 @@ function getSonarrMatchForAnime(anime, library) {
   };
 }
 
+function isInSonarrLibrary(anime, library) {
+  const { match } = findBestSeriesMatch(anime, library.index);
+
+  if (match) return true;
+
+  // fallback: franchise matching (copy from your existing logic)
+  const familyTitles = getSonarrFamilyTitles(anime);
+
+  return library.series.some((series) => {
+    const seriesTitles = [
+      series?.title,
+      series?.sortTitle,
+      series?.titleSlug,
+      ...(Array.isArray(series?.alternateTitles)
+        ? series.alternateTitles.map((alt) => (typeof alt === 'string' ? alt : alt?.title)).filter(Boolean)
+        : []),
+    ]
+      .map((t) => normalizeFranchiseTitle(t))
+      .filter(Boolean);
+
+    return familyTitles.some((ft) =>
+      seriesTitles.includes(normalizeFranchiseTitle(ft))
+    );
+  });
+}
+
 async function handleApi(req, res, url) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -1155,6 +1196,95 @@ async function handleApi(req, res, url) {
       autoloadPages: Number(process.env.AUTOLOAD_PAGES || 4),
       defaultType: String(config.defaultType || 'ALL').toUpperCase(),
     });
+    return;
+  }
+
+  if (url.pathname === '/api/season-stats' && req.method === 'GET') {
+    try {
+      const now = new Date();
+      const { season, seasonYear } = currentSeasonParts(now);
+
+      const range = getSeasonDateRange(season, seasonYear);
+      const daysLeft = daysBetween(now, range.end);
+
+      // 1. Fetch seasonal anime
+      let page = 1;
+      let hasNextPage = true;
+      let media = [];
+
+      while (hasNextPage && page <= 5) { // safety limit
+        const data = await fetchAniList({
+          query: ANILIST_LIST_QUERY,
+          variables: {
+            page,
+            perPage: 50,
+            season,
+            seasonYear,
+            sort: ['POPULARITY_DESC']
+          },
+        });
+
+        const pageData = data.Page.media || [];
+        media = media.concat(pageData);
+
+        hasNextPage = data.Page.pageInfo?.hasNextPage;
+        page++;
+      }
+
+      const tv = media.filter((m) => m.format === 'TV');
+      const movies = media.filter((m) => m.format === 'MOVIE');
+
+      // 2. Load libraries
+      const sonarrLib = await loadSonarrLibrary(config);
+      const radarrLib = await loadRadarrLibrary(config);
+
+      // 3. Count matches
+      let sonarrIn = 0;
+      let radarrIn = 0;
+
+for (const anime of tv) {
+  if (isInSonarrLibrary(anime, sonarrLib)) {
+    sonarrIn++;
+  }
+}
+
+      for (const movie of movies) {
+        const match = getRadarrMatchForMovie(movie, radarrLib);
+        if (match.inRadarr) radarrIn++;
+      }
+
+      const tvTotal = tv.length;
+      const movieTotal = movies.length;
+
+      const sonarrNotIn = tvTotal - sonarrIn;
+      const radarrNotIn = movieTotal - radarrIn;
+
+      json(res, 200, {
+        season,
+        seasonYear,
+        seasonDisplay: `${seasonYear} ${season}`,
+        daysLeft,
+
+        tvTotal,
+        movieTotal,
+
+        tvInSonarr: `${sonarrIn} / ${tvTotal}`,
+        moviesInRadarr: `${radarrIn} / ${movieTotal}`,
+
+        sonarr: {
+          inLibrary: sonarrIn,
+          notInLibrary: sonarrNotIn,
+          total: tvTotal,
+        },
+        radarr: {
+          inLibrary: radarrIn,
+          notInLibrary: radarrNotIn,
+          total: movieTotal,
+        },
+      });
+    } catch (error) {
+      json(res, 500, { error: String(error.message || error) });
+    }
     return;
   }
 
