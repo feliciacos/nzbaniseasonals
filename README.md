@@ -116,6 +116,8 @@ Add below to your services.yaml
         - field: moviesInRadarr
           label: Movies (Radarr)
 ```
+<img width="565" height="251" alt="image" src="https://github.com/user-attachments/assets/342ac545-bc73-4459-a32f-711b96fb1e6c" />
+
 
 ## Development Notes
 
