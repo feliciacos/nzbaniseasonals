@@ -7,5 +7,12 @@ services:
     restart: unless-stopped
     ports:
       - "8787:8787"
+    environment:
+      APITYPE: ${APITYPE:-ANI}
+      MAL_CLIENT_ID: ${MAL_CLIENT_ID:-}
+      MAL_CLIENT_SECRET: ${MAL_CLIENT_SECRET:-}
+      REFRESHONLOAD: ${REFRESHONLOAD:-false}
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-30m}
+      SHOW_SYNC_NOW_BUTTON: ${SHOW_SYNC_NOW_BUTTON:-true}
     volumes:
       - ./:/app

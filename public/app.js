@@ -28,6 +28,7 @@ const detailStats = document.querySelector('#detailStats');
 const detailAddBtn = document.querySelector('#detailAddBtn');
 const detailResult = document.querySelector('#detailResult');
 const sonarrInfoBtn = document.querySelector('#sonarrInfoBtn');
+const syncNowBtn = document.querySelector('#syncNowBtn');
 const sonarrLogDialog = document.querySelector('#sonarrLogDialog');
 const sonarrLogContent = document.querySelector('#sonarrLogContent');
 const sonarrLogClose = document.querySelector('#sonarrLogClose');
@@ -65,6 +66,11 @@ let searchTimer = null;
 let sonarrDebugLog = [];
 let AUTO_PREFETCH_MAX_PAGES = 4;
 let autoLoadTimer = null;
+let activeApiSource = null;
+let apiFallbackNote = null;
+let librarySyncStatus = null;
+let librarySyncPollTimer = null;
+let lastSeenLibrarySyncKey = null;
 
 const seasonLabel = (season) => ({ SPRING: 'Spring', SUMMER: 'Summer', FALL: 'Fall', WINTER: 'Winter' }[season] || season);
 const seasonOrder = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
@@ -496,49 +502,107 @@ function cleanHtml(text) {
   return (tmp.textContent || tmp.innerText || '').trim();
 }
 
+function formatRelativeDuration(ms) {
+  const value = Math.max(0, Math.round(Number(ms) || 0));
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (value < minute) return 'less than 1 min';
+  if (value < hour) {
+    const minutes = Math.round(value / minute);
+    return `${minutes} min`;
+  }
+  if (value < day) {
+    const hours = Math.round(value / hour);
+    return `${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+  const days = Math.round(value / day);
+  return `${days} day${days === 1 ? '' : 's'}`;
+}
+
+function formatTimeSince(timestamp) {
+  if (!timestamp) return 'not synced yet';
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return 'not synced yet';
+  const elapsed = Date.now() - value;
+  if (elapsed < 60 * 1000) return 'just now';
+  return `${formatRelativeDuration(elapsed)} ago`;
+}
+
+function formatTimeUntil(timestamp) {
+  if (!timestamp) return 'not scheduled';
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return 'not scheduled';
+  return formatRelativeDuration(value - Date.now());
+}
+
+function configuredLibraryCount() {
+  return Number(Boolean(meta?.sonarrConfigured)) + Number(Boolean(meta?.radarrConfigured));
+}
+
 function updateStatusLine() {
-  if (sonarrLibraryLoading) {
-    sonarrSpinner.hidden = false;
-    sonarrText.textContent = 'Loading sonarr...';
-    return;
+  const hasLibrariesConfigured = configuredLibraryCount() > 0;
+  const syncStatus = librarySyncStatus || meta?.librarySync || null;
+  const syncing = Boolean(syncStatus?.syncing) || sonarrLibraryLoading || radarrLibraryLoading;
+
+  if (syncNowBtn) {
+    syncNowBtn.hidden = !(hasLibrariesConfigured && meta?.showSyncNowButton);
+    syncNowBtn.disabled = syncing;
   }
 
-  if (radarrLibraryLoading) {
+  if (syncing) {
     sonarrSpinner.hidden = false;
-    sonarrText.textContent = 'Loading radarr...';
+    sonarrText.textContent = syncStatus?.syncing ? 'Syncing libraries...' : 'Loading libraries...';
     return;
   }
 
   sonarrSpinner.hidden = true;
 
-  const sonarrReady = Boolean(meta?.sonarrConfigured);
-  const radarrReady = Boolean(meta?.radarrConfigured);
-
-  if (!sonarrReady && !radarrReady) {
+  if (!hasLibrariesConfigured) {
     sonarrText.textContent = 'No libraries configured';
     return;
   }
 
-  if (sonarrLibraryError || radarrLibraryError) {
-    sonarrText.textContent = `Library sync failed: ${sonarrLibraryError || radarrLibraryError}`;
+  const errorText = syncStatus?.lastError || sonarrLibraryError || radarrLibraryError;
+  if (errorText) {
+    sonarrText.textContent = `Library sync failed: ${errorText}`;
     return;
   }
 
+  if (syncStatus && meta?.refreshOnLoad === false) {
+    if (syncStatus.lastLibraryFetchedAt || syncStatus.lastSyncAt) {
+      const syncTime = formatTimeSince(syncStatus.lastLibraryFetchedAt || syncStatus.lastSyncAt);
+      const nextSync = formatTimeUntil(syncStatus.nextSyncAt);
+      sonarrText.textContent = `Synced Libraries ${syncTime} - next sync: ${nextSync}`;
+      return;
+    }
+
+    const nextSync = formatTimeUntil(syncStatus.nextSyncAt);
+    sonarrText.textContent = `Library sync pending - next sync: ${nextSync}`;
+    return;
+  }
+
+  const sonarrReady = Boolean(meta?.sonarrConfigured);
+  const radarrReady = Boolean(meta?.radarrConfigured);
+
   if (sonarrReady && radarrReady) {
-    sonarrText.textContent = 'Synced Libraries';
+    const fetchedAt = Math.max(Number(sonarrLibrary?.fetchedAt || 0), Number(radarrLibrary?.fetchedAt || 0));
+    sonarrText.textContent = fetchedAt ? `Synced Libraries ${formatTimeSince(fetchedAt)}` : 'Synced Libraries';
     return;
   }
 
   if (sonarrReady) {
-    sonarrText.textContent = 'Sonarr synced';
+    sonarrText.textContent = sonarrLibrary?.fetchedAt ? `Sonarr synced ${formatTimeSince(sonarrLibrary.fetchedAt)}` : 'Sonarr synced';
     return;
   }
 
   if (radarrReady) {
-    sonarrText.textContent = 'Radarr synced';
+    sonarrText.textContent = radarrLibrary?.fetchedAt ? `Radarr synced ${formatTimeSince(radarrLibrary.fetchedAt)}` : 'Radarr synced';
     return;
   }
 }
+
 
 const sortLabels = {
   TRENDING_DESC: 'Trending',
@@ -550,7 +614,9 @@ const sortLabels = {
 
 function syncStatusText() {
   const sortLabel = sortLabels[activeSort] || activeSort;
-  statusText.textContent = `${seasonLabel(currentFilters.season)} ${currentFilters.seasonYear} - ${sortLabel} - ${items.length} titles loaded`;
+  const sourceLabel = activeApiSource || meta?.apiSource || 'AniList';
+  const fallbackLabel = apiFallbackNote ? ` - ${apiFallbackNote}` : '';
+  statusText.textContent = `${seasonLabel(currentFilters.season)} ${currentFilters.seasonYear} - ${sortLabel} - ${items.length} titles loaded - ${sourceLabel}${fallbackLabel}`;
 }
 
 function syncSortButtons() {
@@ -628,6 +694,7 @@ function libraryStateForItem(item) {
   if (item.sonarrAdded || item.radarrAdded || known?.inLibrary) return { state: 'added', text: `Already in ${label}`, disabled: true, manager };
   if (!configured) return { state: 'unconfigured', text: `${label} not set`, disabled: true, manager };
   if (loading && !statusMap.has(item.id)) return { state: 'checking', text: 'Checking...', disabled: true, manager };
+  if (!libraryForItem(item) && !statusMap.has(item.id)) return { state: 'waiting', text: 'Waiting for sync...', disabled: true, manager };
   return { state: 'ready', text: `Add to ${label}`, disabled: false, manager };
 }
 
@@ -822,13 +889,14 @@ function renderDetail(item, { loading = false } = {}) {
     : '—';
 
   detailStats.innerHTML = '';
+  const idLabel = item?.dataSource === 'MAL' ? 'MAL ID' : 'AniList ID';
   const rows = [
     ['Season', seasonText],
     ['Source', sourceText],
     ['Status', statusTextValue],
     ['Studios', studios],
     ['Next airing', nextAiring],
-    ['AniList ID', item?.id ?? '—'],
+    [idLabel, item?.id ?? '—'],
   ];
   for (const [label, value] of rows) {
     const row = document.createElement('div');
@@ -864,28 +932,32 @@ function recomputeLibraryStatuses() {
   const nextRadarrMap = new Map();
 
   for (const item of items) {
-    const sonarrMatch = sonarrLibrary ? getSonarrMatch(item) : null;
-    const radarrMatch = radarrLibrary ? getRadarrMatch(item) : null;
+    if (sonarrLibrary) {
+      const sonarrMatch = getSonarrMatch(item);
+      nextSonarrMap.set(item.id, {
+        inLibrary: Boolean(sonarrMatch),
+        matchedTitle: sonarrMatch?.title || null,
+        libraryId: sonarrMatch?.id ?? null,
+        tvdbId: sonarrMatch?.tvdbId ?? null,
+      });
+    }
 
-    nextSonarrMap.set(item.id, {
-      inLibrary: Boolean(sonarrMatch),
-      matchedTitle: sonarrMatch?.title || null,
-      libraryId: sonarrMatch?.id ?? null,
-      tvdbId: sonarrMatch?.tvdbId ?? null,
-    });
-
-    nextRadarrMap.set(item.id, {
-      inLibrary: Boolean(radarrMatch),
-      matchedTitle: radarrMatch?.title || null,
-      libraryId: radarrMatch?.id ?? null,
-      tvdbId: radarrMatch?.tvdbId ?? null,
-    });
+    if (radarrLibrary) {
+      const radarrMatch = getRadarrMatch(item);
+      nextRadarrMap.set(item.id, {
+        inLibrary: Boolean(radarrMatch),
+        matchedTitle: radarrMatch?.title || null,
+        libraryId: radarrMatch?.id ?? null,
+        tvdbId: radarrMatch?.tvdbId ?? null,
+      });
+    }
   }
 
   sonarrStatusMap = nextSonarrMap;
   radarrStatusMap = nextRadarrMap;
   renderVisibleView();
 }
+
 
 async function refreshLibraryStatuses() {
   recomputeLibraryStatuses();
@@ -894,6 +966,7 @@ async function refreshLibraryStatuses() {
 async function loadMeta() {
   const response = await fetch('/api/meta');
   meta = await response.json();
+  librarySyncStatus = meta?.librarySync || null;
   AUTO_PREFETCH_MAX_PAGES = Number(meta?.autoloadPages || 4);
 
   const baseSeason = getCurrentSeason();
@@ -922,7 +995,7 @@ async function loadMeta() {
   syncStatusText();
 }
 
-async function loadSonarrLibrary() {
+async function loadSonarrLibrary({ forceRefresh = false, cacheOnly = false } = {}) {
   if (!meta?.sonarrConfigured) {
     sonarrLibraryLoading = false;
     updateStatusLine();
@@ -931,14 +1004,25 @@ async function loadSonarrLibrary() {
 
   if (sonarrLibraryPromise) return sonarrLibraryPromise;
 
-  sonarrLibraryLoading = true;
+  sonarrLibraryLoading = !cacheOnly;
   sonarrLibraryError = null;
   updateStatusLine();
 
-  sonarrLibraryPromise = fetch('/api/sonarr/library')
+  const params = new URLSearchParams();
+  if (forceRefresh) params.set('refresh', '1');
+  if (cacheOnly) params.set('cacheOnly', '1');
+  const query = params.toString() ? `?${params}` : '';
+
+  sonarrLibraryPromise = fetch(`/api/sonarr/library${query}`)
     .then(async (response) => {
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || 'Failed to load Sonarr library');
+      if (data.syncStatus) librarySyncStatus = data.syncStatus;
+
+      if (!data.cacheReady && cacheOnly) {
+        return null;
+      }
+
       const series = Array.isArray(data.series) ? data.series : [];
       sonarrLibrary = {
         series,
@@ -948,8 +1032,10 @@ async function loadSonarrLibrary() {
       return sonarrLibrary;
     })
     .catch((error) => {
-      sonarrLibraryError = error.message;
-      sonarrLibrary = null;
+      if (!cacheOnly) {
+        sonarrLibraryError = error.message;
+        sonarrLibrary = null;
+      }
       throw error;
     })
     .finally(() => {
@@ -962,7 +1048,8 @@ async function loadSonarrLibrary() {
   return sonarrLibraryPromise;
 }
 
-async function loadRadarrLibrary() {
+
+async function loadRadarrLibrary({ forceRefresh = false, cacheOnly = false } = {}) {
   if (!meta?.radarrConfigured) {
     radarrLibraryLoading = false;
     updateStatusLine();
@@ -971,14 +1058,25 @@ async function loadRadarrLibrary() {
 
   if (radarrLibraryPromise) return radarrLibraryPromise;
 
-  radarrLibraryLoading = true;
+  radarrLibraryLoading = !cacheOnly;
   radarrLibraryError = null;
   updateStatusLine();
 
-  radarrLibraryPromise = fetch('/api/radarr/library')
+  const params = new URLSearchParams();
+  if (forceRefresh) params.set('refresh', '1');
+  if (cacheOnly) params.set('cacheOnly', '1');
+  const query = params.toString() ? `?${params}` : '';
+
+  radarrLibraryPromise = fetch(`/api/radarr/library${query}`)
     .then(async (response) => {
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || 'Failed to load Radarr library');
+      if (data.syncStatus) librarySyncStatus = data.syncStatus;
+
+      if (!data.cacheReady && cacheOnly) {
+        return null;
+      }
+
       const series = Array.isArray(data.series) ? data.series : [];
       radarrLibrary = {
         series,
@@ -988,8 +1086,10 @@ async function loadRadarrLibrary() {
       return radarrLibrary;
     })
     .catch((error) => {
-      radarrLibraryError = error.message;
-      radarrLibrary = null;
+      if (!cacheOnly) {
+        radarrLibraryError = error.message;
+        radarrLibrary = null;
+      }
       throw error;
     })
     .finally(() => {
@@ -1000,6 +1100,73 @@ async function loadRadarrLibrary() {
     });
 
   return radarrLibraryPromise;
+}
+
+
+async function loadCachedLibrariesFromServer() {
+  const tasks = [];
+  if (meta?.sonarrConfigured) tasks.push(loadSonarrLibrary({ cacheOnly: true }).catch(() => null));
+  if (meta?.radarrConfigured) tasks.push(loadRadarrLibrary({ cacheOnly: true }).catch(() => null));
+  if (tasks.length) await Promise.all(tasks);
+}
+
+async function loadLibrarySyncStatus({ refreshCachedLibraries = true } = {}) {
+  if (!configuredLibraryCount()) {
+    updateStatusLine();
+    return null;
+  }
+
+  try {
+    const response = await fetch('/api/library-sync/status');
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Failed to load library sync status');
+    librarySyncStatus = data;
+
+    const syncKey = [data.lastLibraryFetchedAt, data.sonarr?.fetchedAt, data.radarr?.fetchedAt].filter(Boolean).join(':');
+    if (refreshCachedLibraries && syncKey && syncKey !== lastSeenLibrarySyncKey) {
+      lastSeenLibrarySyncKey = syncKey;
+      await loadCachedLibrariesFromServer();
+    }
+
+    updateStatusLine();
+    return data;
+  } catch (error) {
+    librarySyncStatus = { ...(librarySyncStatus || {}), lastError: error.message };
+    updateStatusLine();
+    return null;
+  }
+}
+
+function startLibrarySyncPolling() {
+  if (librarySyncPollTimer) clearInterval(librarySyncPollTimer);
+  if (!configuredLibraryCount()) return;
+
+  librarySyncPollTimer = setInterval(() => {
+    void loadLibrarySyncStatus({ refreshCachedLibraries: true });
+  }, 30_000);
+}
+
+async function runManualLibrarySync() {
+  if (!syncNowBtn || syncNowBtn.disabled) return;
+
+  syncNowBtn.disabled = true;
+  sonarrSpinner.hidden = false;
+  sonarrText.textContent = 'Syncing libraries...';
+
+  try {
+    const response = await fetch('/api/library-sync/run', { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Library sync failed');
+    librarySyncStatus = data;
+    await loadCachedLibrariesFromServer();
+    recomputeLibraryStatuses();
+    updateStatusLine();
+  } catch (error) {
+    librarySyncStatus = { ...(librarySyncStatus || {}), lastError: error.message, syncing: false };
+    updateStatusLine();
+  } finally {
+    syncNowBtn.disabled = false;
+  }
 }
 
 async function fetchAnime(reset = false) {
@@ -1013,6 +1180,7 @@ async function fetchAnime(reset = false) {
       hasNextPage = true;
       items = [];
       sonarrStatusMap = new Map();
+      radarrStatusMap = new Map();
       addingIds = new Set();
     }
 
@@ -1031,6 +1199,9 @@ async function fetchAnime(reset = false) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to load anime');
 
+    activeApiSource = data.apiSource || meta?.apiSource || null;
+    apiFallbackNote = data.fallbackUsed && data.fallbackFrom ? `fallback from ${data.fallbackFrom}` : null;
+
     const nextItems = (data.media || []).map((item) => ({ ...item, sonarrAdded: false }));
     const merged = reset ? nextItems : items.concat(nextItems);
     const deduped = new Map();
@@ -1046,13 +1217,18 @@ async function fetchAnime(reset = false) {
     loadMoreBtn.disabled = !hasNextPage;
     loadMoreBtn.textContent = hasNextPage ? 'Load more' : 'No more results';
 
-    if (sonarrLibrary) {
+    if (sonarrLibrary || radarrLibrary) {
       recomputeLibraryStatuses();
-    } else if (meta?.sonarrConfigured && !sonarrLibraryPromise) {
-      void loadSonarrLibrary();
-    } else {
-      updateStatusLine();
     }
+
+    if (meta?.sonarrConfigured && !sonarrLibrary && !sonarrLibraryPromise) {
+      void loadSonarrLibrary({ cacheOnly: !meta?.refreshOnLoad }).catch(() => null);
+    }
+    if (meta?.radarrConfigured && !radarrLibrary && !radarrLibraryPromise) {
+      void loadRadarrLibrary({ cacheOnly: !meta?.refreshOnLoad }).catch(() => null);
+    }
+
+    updateStatusLine();
   } catch (error) {
     statusText.textContent = `Error: ${error.message}`;
     renderVisibleView();
@@ -1090,6 +1266,8 @@ async function openAnimeDetail(id, { pushState = true } = {}) {
     if (!response.ok || !data.ok) throw new Error(data.error || 'Failed to load anime details');
     const media = data.media || null;
     if (token !== detailFetchToken) return;
+    if (data.apiSource) activeApiSource = data.apiSource;
+    apiFallbackNote = data.fallbackUsed && data.fallbackFrom ? `fallback from ${data.fallbackFrom}` : apiFallbackNote;
     currentDetailAnime = {
       ...(cached || {}),
       ...(media || {}),
@@ -1149,12 +1327,13 @@ loadMoreBtn.addEventListener('click', () => {
 });
 
 refreshBtn.addEventListener('click', async () => {
-  if (meta?.sonarrConfigured) {
-    await loadSonarrLibrary().catch(() => null);
+  if (meta?.refreshOnLoad) {
+    if (meta?.sonarrConfigured) await loadSonarrLibrary({ forceRefresh: true }).catch(() => null);
+    if (meta?.radarrConfigured) await loadRadarrLibrary({ forceRefresh: true }).catch(() => null);
+  } else {
+    await loadLibrarySyncStatus({ refreshCachedLibraries: true });
   }
-  if (meta?.radarrConfigured) {
-    await loadRadarrLibrary().catch(() => null);
-  }
+
   await refreshAnime(true);
 });
 
@@ -1258,6 +1437,10 @@ yearInput.addEventListener('change', () => {
   setFilters({ season: seasonSelect.value, seasonYear: Number(yearInput.value) }, { closeAdvanced: false });
 });
 
+syncNowBtn?.addEventListener('click', () => {
+  void runManualLibrarySync();
+});
+
 sonarrInfoBtn?.addEventListener('click', () => {
   if (!sonarrLogDialog) return;
   if (typeof sonarrLogDialog.showModal === 'function') sonarrLogDialog.showModal();
@@ -1306,11 +1489,14 @@ window.addEventListener('hashchange', handleRoute);
   updateQuickButtons();
   setupLoadMoreObserver();
 
-  if (meta?.sonarrConfigured) {
-    await loadSonarrLibrary().catch(() => null);
-  }
-  if (meta?.radarrConfigured) {
-    await loadRadarrLibrary().catch(() => null);
+  await loadLibrarySyncStatus({ refreshCachedLibraries: false });
+  startLibrarySyncPolling();
+
+  if (meta?.refreshOnLoad) {
+    if (meta?.sonarrConfigured) await loadSonarrLibrary({ forceRefresh: true }).catch(() => null);
+    if (meta?.radarrConfigured) await loadRadarrLibrary({ forceRefresh: true }).catch(() => null);
+  } else {
+    void loadCachedLibrariesFromServer().catch(() => null);
   }
 
   updateStatusLine();

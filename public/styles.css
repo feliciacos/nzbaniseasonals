@@ -208,6 +208,13 @@ select:focus {
   align-items: center;
   gap: 8px;
   min-height: 20px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.sync-now-btn {
+  font-size: 12px;
+  padding: 5px 8px;
 }
 
 .spinner {

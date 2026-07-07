@@ -21,6 +21,47 @@ try {
   console.warn('No config.json found, using env only');
 }
 
+function firstConfiguredValue(envNames = [], fileNames = [], fallback = undefined) {
+  for (const name of envNames) {
+    const value = process.env[name];
+    if (value !== undefined && String(value).trim() !== '') return value;
+  }
+
+  for (const name of fileNames) {
+    const value = fileConfig?.[name];
+    if (value !== undefined && String(value).trim?.() !== '') return value;
+  }
+
+  return fallback;
+}
+
+function booleanConfigValue(envNames = [], fileNames = [], fallback = false) {
+  const value = firstConfiguredValue(envNames, fileNames, fallback);
+  if (typeof value === 'boolean') return value;
+
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on', 'enabled'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'n', 'off', 'disabled'].includes(normalized)) return false;
+  return Boolean(fallback);
+}
+
+function parseLibrarySyncInterval(value, fallback = '30m') {
+  const raw = String(value || fallback || '30m').trim().toLowerCase();
+  const match = raw.match(/^(\d+)\s*([mhd])$/);
+  const resolved = match ? raw : String(fallback || '30m').trim().toLowerCase();
+  const resolvedMatch = resolved.match(/^(\d+)\s*([mhd])$/) || ['30m', '30', 'm'];
+  const amount = Math.max(1, Number(resolvedMatch[1]) || 30);
+  const unit = resolvedMatch[2] || 'm';
+  const multiplier = unit === 'd' ? 24 * 60 * 60 * 1000 : unit === 'h' ? 60 * 60 * 1000 : 60 * 1000;
+
+  return {
+    raw: `${amount}${unit}`,
+    amount,
+    unit,
+    ms: amount * multiplier,
+  };
+}
+
 const config = {
   sonarrUrl: process.env.SONARR_URL || fileConfig.sonarrUrl,
   sonarrApiKey: process.env.SONARR_API_KEY || fileConfig.sonarrApiKey,
@@ -39,6 +80,14 @@ const config = {
   defaultSort: process.env.DEFAULTSORT || fileConfig.defaultSort || 'Trending',
   alreadyInLib: process.env.ALREADYINLIB || fileConfig.alreadyInLib || 'None',
   defaultType: process.env.DEFAULTTYPE || fileConfig.defaultType || 'ALL',
+
+  apiType: process.env.APITYPE || fileConfig.apiType || 'ANI',
+  malClientId: process.env.MAL_CLIENT_ID || fileConfig.malClientId || '',
+  malClientSecret: process.env.MAL_CLIENT_SECRET || fileConfig.malClientSecret || '',
+
+  refreshOnLoad: booleanConfigValue(['REFRESHONLOAD', 'REFRESH_ON_LOAD'], ['refreshOnLoad'], false),
+  syncInterval: firstConfiguredValue(['SYNC_INTERVAL', 'SYNCINTERVAL'], ['syncInterval'], '30m'),
+  showSyncNowButton: booleanConfigValue(['SHOW_SYNC_NOW_BUTTON', 'SHOWSYNCNOWBUTTON'], ['showSyncNowButton'], true),
 };
 
 if (!config.sonarrUrl || !config.sonarrApiKey) {
@@ -48,6 +97,7 @@ if (!config.sonarrUrl || !config.sonarrApiKey) {
 
 const PORT = Number(process.env.PORT || 8787);
 const SONARR_CACHE_TTL_MS = 5 * 60 * 1000;
+const librarySyncInterval = parseLibrarySyncInterval(config.syncInterval, '30m');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -92,6 +142,18 @@ const radarrAuxCache = {
   promise: null,
 };
 
+const librarySyncState = {
+  syncing: false,
+  promise: null,
+  timer: null,
+  lastSyncAt: null,
+  nextSyncAt: null,
+  lastDurationMs: null,
+  lastReason: null,
+  lastError: null,
+  lastResults: null,
+};
+
 function json(res, status, data) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -105,19 +167,30 @@ function json(res, status, data) {
 function currentSeasonParts(date = new Date()) {
   const month = date.getMonth() + 1;
   const year = date.getFullYear();
-  if (month >= 3 && month <= 5) return { season: 'SPRING', seasonYear: year };
-  if (month >= 6 && month <= 8) return { season: 'SUMMER', seasonYear: year };
-  if (month >= 9 && month <= 11) return { season: 'FALL', seasonYear: year };
-  return { season: 'WINTER', seasonYear: month === 12 ? year + 1 : year };
+
+  if (month >= 1 && month <= 3) {
+    return { season: 'WINTER', seasonYear: year };
+  }
+
+  if (month >= 4 && month <= 6) {
+    return { season: 'SPRING', seasonYear: year };
+  }
+
+  if (month >= 7 && month <= 9) {
+    return { season: 'SUMMER', seasonYear: year };
+  }
+
+  return { season: 'FALL', seasonYear: year };
 }
 
 function getSeasonDateRange(season, year) {
   const ranges = {
-    SPRING: { start: `${year}-03-01`, end: `${year}-05-31` },
-    SUMMER: { start: `${year}-06-01`, end: `${year}-08-31` },
-    FALL: { start: `${year}-09-01`, end: `${year}-11-30` },
-    WINTER: { start: `${year}-12-01`, end: `${year + 1}-02-28` },
+    WINTER: { start: `${year}-01-01`, end: `${year}-03-31` },
+    SPRING: { start: `${year}-04-01`, end: `${year}-06-30` },
+    SUMMER: { start: `${year}-07-01`, end: `${year}-09-30` },
+    FALL: { start: `${year}-10-01`, end: `${year}-12-31` },
   };
+
   return ranges[season];
 }
 
@@ -156,6 +229,20 @@ function alreadyInLibValue(value) {
   if (v === 'true') return 'IN';
   if (v === 'false') return 'OUT';
   return 'ALL'; // None or anything else
+}
+
+function normalizeApiType(value) {
+  const v = String(value || '').trim().toUpperCase();
+  if (['MAL', 'MYANIMELIST'].includes(v)) return 'MAL';
+  return 'ANI';
+}
+
+function preferredApiType() {
+  return normalizeApiType(config.apiType);
+}
+
+function apiProviderLabel(value = preferredApiType()) {
+  return normalizeApiType(value) === 'MAL' ? 'MyAnimeList' : 'AniList';
 }
 
 const ANILIST_LIST_QUERY = `
@@ -212,6 +299,84 @@ query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int, $searc
         year
         month
         day
+      }
+      siteUrl
+    }
+  }
+}`;
+
+const ANILIST_SEASONAL_API_QUERY = `
+query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int, $sort: [MediaSort]) {
+  Page(page: $page, perPage: $perPage) {
+    pageInfo {
+      hasNextPage
+      currentPage
+      lastPage
+      total
+    }
+    media(
+      type: ANIME,
+      season: $season,
+      seasonYear: $seasonYear,
+      sort: $sort,
+      isAdult: false
+    ) {
+      id
+      idMal
+      title {
+        romaji
+        english
+        native
+      }
+      synonyms
+      coverImage {
+        large
+        extraLarge
+        color
+      }
+      bannerImage
+      episodes
+      format
+      status
+      season
+      seasonYear
+      averageScore
+      meanScore
+      popularity
+      trending
+      genres
+      tags {
+        name
+        rank
+      }
+      nextAiringEpisode {
+        episode
+        timeUntilAiring
+        airingAt
+      }
+      airingSchedule(notYetAired: false, perPage: 50) {
+        nodes {
+          episode
+          airingAt
+        }
+      }
+      startDate {
+        year
+        month
+        day
+      }
+      relations {
+        edges {
+          relationType
+          node {
+            id
+            title {
+              romaji
+              english
+              native
+            }
+          }
+        }
       }
       siteUrl
     }
@@ -414,6 +579,321 @@ async function fetchAniList({ query, variables }) {
   return data.data;
 }
 
+
+const MAL_API_FIELDS = [
+  'id',
+  'title',
+  'main_picture',
+  'alternative_titles',
+  'start_date',
+  'end_date',
+  'synopsis',
+  'mean',
+  'rank',
+  'popularity',
+  'num_list_users',
+  'num_scoring_users',
+  'media_type',
+  'status',
+  'genres',
+  'num_episodes',
+  'start_season',
+  'broadcast',
+  'source',
+  'average_episode_duration',
+  'rating',
+  'studios',
+  'related_anime',
+].join(',');
+
+function requireMalClientId() {
+  const clientId = String(config.malClientId || '').trim();
+  if (!clientId || clientId === 'your_client_id_here') {
+    throw new Error('MAL_CLIENT_ID is required when using MyAnimeList. Add it to .env or Docker environment settings.');
+  }
+  return clientId;
+}
+
+async function fetchMal(pathname, params = {}) {
+  const clientId = requireMalClientId();
+  const url = new URL(`https://api.myanimelist.net/v2${pathname}`);
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue;
+    url.searchParams.set(key, String(value));
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      'X-MAL-CLIENT-ID': clientId,
+    },
+  });
+
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = text;
+  }
+
+  if (!response.ok) {
+    const message = typeof payload === 'string'
+      ? payload
+      : payload?.message || payload?.error || `MyAnimeList request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
+function mapMalFormat(mediaType) {
+  const value = String(mediaType || '').toLowerCase();
+  const map = {
+    tv: 'TV',
+    ova: 'OVA',
+    movie: 'MOVIE',
+    special: 'SPECIAL',
+    ona: 'ONA',
+    music: 'MUSIC',
+    tv_special: 'SPECIAL',
+  };
+  return map[value] || (value ? value.toUpperCase() : null);
+}
+
+function mapMalStatus(status) {
+  const value = String(status || '').toLowerCase();
+  const map = {
+    currently_airing: 'RELEASING',
+    finished_airing: 'FINISHED',
+    not_yet_aired: 'NOT_YET_RELEASED',
+  };
+  return map[value] || (value ? value.toUpperCase() : null);
+}
+
+function malDateParts(dateValue) {
+  if (!dateValue) return { year: null, month: null, day: null };
+  const [year, month, day] = String(dateValue).split('-').map((part) => Number(part));
+  return {
+    year: Number.isFinite(year) ? year : null,
+    month: Number.isFinite(month) ? month : null,
+    day: Number.isFinite(day) ? day : null,
+  };
+}
+
+function malSortValue(sort) {
+  const values = Array.isArray(sort) ? sort : String(sort || '').split(',');
+  const normalized = values.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean);
+
+  if (normalized.includes('SCORE_DESC')) return 'anime_score';
+  if (normalized.includes('POPULARITY_DESC') || normalized.includes('TRENDING_DESC')) return 'anime_num_list_users';
+  return '';
+}
+
+function mapMalAnime(raw, fallbackSeason = {}) {
+  const anime = raw?.node || raw?.entry || raw || {};
+  const alt = anime.alternative_titles || {};
+  const startSeason = anime.start_season || {};
+  const season = String(startSeason.season || fallbackSeason.season || '').toUpperCase() || null;
+  const seasonYear = Number(startSeason.year || fallbackSeason.seasonYear || 0) || null;
+  const mean = anime.mean != null ? Number(anime.mean) : null;
+  const picture = anime.main_picture || {};
+  const synonyms = [
+    ...(Array.isArray(alt.synonyms) ? alt.synonyms : []),
+    ...(alt.en ? [alt.en] : []),
+    ...(alt.ja ? [alt.ja] : []),
+  ].filter(Boolean);
+
+  return {
+    id: anime.id,
+    idMal: anime.id ?? null,
+    dataSource: 'MAL',
+    title: {
+      romaji: anime.title || null,
+      english: alt.en || null,
+      native: alt.ja || null,
+    },
+    synonyms: [...new Set(synonyms)],
+    description: anime.synopsis || null,
+    coverImage: {
+      large: picture.large || picture.medium || null,
+      extraLarge: picture.large || picture.medium || null,
+      color: null,
+    },
+    bannerImage: null,
+    episodes: anime.num_episodes || null,
+    duration: anime.average_episode_duration ? Math.round(Number(anime.average_episode_duration) / 60) : null,
+    format: mapMalFormat(anime.media_type),
+    status: mapMalStatus(anime.status),
+    season,
+    seasonYear,
+    averageScore: Number.isFinite(mean) ? Math.round(mean * 10) : null,
+    meanScore: Number.isFinite(mean) ? Math.round(mean * 10) : null,
+    popularity: anime.num_list_users ?? anime.popularity ?? null,
+    trending: null,
+    source: anime.source ? String(anime.source).toUpperCase() : null,
+    genres: Array.isArray(anime.genres) ? anime.genres.map((genre) => genre?.name).filter(Boolean) : [],
+    tags: [],
+    relations: {
+      edges: Array.isArray(anime.related_anime)
+        ? anime.related_anime.map((entry) => ({
+          relationType: String(entry?.relation_type || '').toUpperCase() || null,
+          node: entry?.node ? mapMalAnime(entry.node, fallbackSeason) : null,
+        })).filter((edge) => edge.node)
+        : [],
+    },
+    nextAiringEpisode: null,
+    airingSchedule: { nodes: [] },
+    startDate: malDateParts(anime.start_date),
+    studios: {
+      nodes: Array.isArray(anime.studios) ? anime.studios.map((studio) => ({ name: studio?.name })).filter((studio) => studio.name) : [],
+    },
+    siteUrl: anime.id ? `https://myanimelist.net/anime/${anime.id}` : null,
+  };
+}
+
+function mapAniAnime(anime) {
+  return {
+    ...anime,
+    dataSource: 'ANI',
+  };
+}
+
+function mapAniPage(data, meta = {}) {
+  return {
+    ...data.Page,
+    media: (data.Page?.media || []).map(mapAniAnime),
+    apiType: 'ANI',
+    apiSource: apiProviderLabel('ANI'),
+    fallbackUsed: Boolean(meta.fallbackUsed),
+    preferredApiType: preferredApiType(),
+  };
+}
+
+function mapMalPage(data, { page, perPage, season, seasonYear } = {}, meta = {}) {
+  const items = Array.isArray(data?.data) ? data.data.map((entry) => mapMalAnime(entry, { season, seasonYear })) : [];
+  const total = Number(data?.paging?.total || data?.total || 0) || null;
+  const currentPage = Math.max(1, Number(page) || 1);
+  const resolvedPerPage = Math.max(1, Number(perPage) || items.length || 1);
+  const hasNextPage = Boolean(data?.paging?.next) || (total ? currentPage * resolvedPerPage < total : items.length === resolvedPerPage);
+  const lastPage = total ? Math.max(1, Math.ceil(total / resolvedPerPage)) : null;
+
+  return {
+    pageInfo: {
+      hasNextPage,
+      currentPage,
+      lastPage,
+      total,
+    },
+    media: items,
+    apiType: 'MAL',
+    apiSource: apiProviderLabel('MAL'),
+    fallbackUsed: Boolean(meta.fallbackUsed),
+    preferredApiType: preferredApiType(),
+  };
+}
+
+async function fetchAniListPage({ page, perPage, season, seasonYear, search, sort }) {
+  const data = await fetchAniList({
+    query: ANILIST_LIST_QUERY,
+    variables: {
+      page,
+      perPage,
+      season,
+      seasonYear,
+      search: search || undefined,
+      sort: sort?.length ? sort : ['TRENDING_DESC', 'POPULARITY_DESC'],
+    },
+  });
+
+  return mapAniPage(data);
+}
+
+async function fetchMalPage({ page, perPage, season, seasonYear, search, sort }) {
+  const limit = Math.min(100, Math.max(1, Number(perPage) || 20));
+  const offset = (Math.max(1, Number(page) || 1) - 1) * limit;
+
+  if (search) {
+    const data = await fetchMal('/anime', {
+      q: search,
+      limit,
+      offset,
+      fields: MAL_API_FIELDS,
+    });
+    return mapMalPage(data, { page, perPage: limit, season, seasonYear });
+  }
+
+  const data = await fetchMal(`/anime/season/${seasonYear}/${String(season || '').toLowerCase()}`, {
+    sort: malSortValue(sort),
+    limit,
+    offset,
+    fields: MAL_API_FIELDS,
+  });
+
+  return mapMalPage(data, { page, perPage: limit, season, seasonYear });
+}
+
+async function withAnimeProvider({ ani, mal }) {
+  const preferred = preferredApiType();
+  if (preferred === 'MAL') {
+    requireMalClientId();
+  }
+  const primary = preferred === 'MAL' ? mal : ani;
+  const fallback = preferred === 'MAL' ? ani : mal;
+  const primaryName = preferred;
+  const fallbackName = preferred === 'MAL' ? 'ANI' : 'MAL';
+
+  try {
+    return await primary({ fallbackUsed: false });
+  } catch (primaryError) {
+    if (fallbackName === 'MAL' && !String(config.malClientId || '').trim()) {
+      throw primaryError;
+    }
+
+    try {
+      const result = await fallback({ fallbackUsed: true });
+      return {
+        ...result,
+        fallbackUsed: true,
+        fallbackFrom: primaryName,
+        fallbackError: String(primaryError.message || primaryError),
+      };
+    } catch (fallbackError) {
+      throw new Error(`${apiProviderLabel(primaryName)} failed: ${primaryError.message || primaryError}; ${apiProviderLabel(fallbackName)} fallback failed: ${fallbackError.message || fallbackError}`);
+    }
+  }
+}
+
+async function fetchAnimePage(options) {
+  return withAnimeProvider({
+    ani: async ({ fallbackUsed = false } = {}) => ({ ...(await fetchAniListPage(options)), fallbackUsed }),
+    mal: async ({ fallbackUsed = false } = {}) => ({ ...(await fetchMalPage(options)), fallbackUsed }),
+  });
+}
+
+async function fetchAniListDetail(id) {
+  const data = await fetchAniList({
+    query: ANILIST_MEDIA_QUERY,
+    variables: { id },
+  });
+  return { ok: true, media: mapAniAnime(data.Media), apiType: 'ANI', apiSource: apiProviderLabel('ANI') };
+}
+
+async function fetchMalDetail(id) {
+  const data = await fetchMal(`/anime/${id}`, {
+    fields: MAL_API_FIELDS,
+  });
+  return { ok: true, media: mapMalAnime(data), apiType: 'MAL', apiSource: apiProviderLabel('MAL') };
+}
+
+async function fetchAnimeDetail(id) {
+  return withAnimeProvider({
+    ani: async ({ fallbackUsed = false } = {}) => ({ ...(await fetchAniListDetail(id)), fallbackUsed }),
+    mal: async ({ fallbackUsed = false } = {}) => ({ ...(await fetchMalDetail(id)), fallbackUsed }),
+  });
+}
+
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -460,6 +940,72 @@ async function sonarrRequest(config, urlPath, options = {}) {
 
 async function radarrRequest(config, urlPath, options = {}) {
   return apiRequest(config.radarrUrl, config.radarrApiKey, urlPath, options);
+}
+
+function libraryCacheTtlMs() {
+  return config.refreshOnLoad ? SONARR_CACHE_TTL_MS : Number.MAX_SAFE_INTEGER;
+}
+
+function libraryKey(baseUrl, apiKey) {
+  return `${String(baseUrl || '')}::${String(apiKey || '')}`;
+}
+
+function hasValidCache(cache, key) {
+  return cache.key === key && cache.fetchedAt > 0 && Array.isArray(cache.series);
+}
+
+function buildLibraryPayload(cache, key, { cached = true, cacheReady = hasValidCache(cache, key) } = {}) {
+  const series = cacheReady ? cache.series : [];
+  return {
+    series,
+    index: buildSonarrIndex(series),
+    cached,
+    cacheReady,
+    fetchedAt: cacheReady ? cache.fetchedAt : 0,
+  };
+}
+
+function formatSyncInterval(interval = librarySyncInterval) {
+  const unitNames = { m: 'minute', h: 'hour', d: 'day' };
+  const name = unitNames[interval.unit] || 'minute';
+  return `${interval.amount} ${name}${interval.amount === 1 ? '' : 's'}`;
+}
+
+function getLibrarySyncStatus() {
+  const sonarrKey = libraryKey(config.sonarrUrl, config.sonarrApiKey);
+  const radarrKey = libraryKey(config.radarrUrl, config.radarrApiKey);
+  const sonarrReady = hasValidCache(sonarrCache, sonarrKey);
+  const radarrReady = hasValidCache(radarrCache, radarrKey);
+  const fetchedTimes = [sonarrReady ? sonarrCache.fetchedAt : 0, radarrReady ? radarrCache.fetchedAt : 0].filter(Boolean);
+  const lastLibraryFetchedAt = fetchedTimes.length ? Math.max(...fetchedTimes) : null;
+
+  return {
+    refreshOnLoad: Boolean(config.refreshOnLoad),
+    showSyncNowButton: Boolean(config.showSyncNowButton),
+    syncInterval: librarySyncInterval.raw,
+    syncIntervalLabel: formatSyncInterval(),
+    syncIntervalMs: librarySyncInterval.ms,
+    syncing: librarySyncState.syncing,
+    lastSyncAt: librarySyncState.lastSyncAt,
+    nextSyncAt: config.refreshOnLoad ? null : librarySyncState.nextSyncAt,
+    lastDurationMs: librarySyncState.lastDurationMs,
+    lastReason: librarySyncState.lastReason,
+    lastError: librarySyncState.lastError,
+    lastResults: librarySyncState.lastResults,
+    lastLibraryFetchedAt,
+    sonarr: {
+      configured: Boolean(config.sonarrUrl && config.sonarrApiKey),
+      cacheReady: sonarrReady,
+      count: sonarrReady ? sonarrCache.series.length : 0,
+      fetchedAt: sonarrReady ? sonarrCache.fetchedAt : null,
+    },
+    radarr: {
+      configured: Boolean(config.radarrUrl && config.radarrApiKey),
+      cacheReady: radarrReady,
+      count: radarrReady ? radarrCache.series.length : 0,
+      fetchedAt: radarrReady ? radarrCache.fetchedAt : null,
+    },
+  };
 }
 
 function buildAddPayload(candidate, config, setup = {}) {
@@ -609,12 +1155,17 @@ function buildRadarrAddPayload(candidate, config, setup = {}) {
   };
 }
 
-async function loadRadarrLibrary(config, { forceRefresh = false } = {}) {
-  const key = `${String(config.radarrUrl || '')}::${String(config.radarrApiKey || '')}`;
+async function loadRadarrLibrary(config, { forceRefresh = false, cacheOnly = false } = {}) {
+  const key = libraryKey(config.radarrUrl, config.radarrApiKey);
   const now = Date.now();
+  const cacheReady = hasValidCache(radarrCache, key);
 
-  if (!forceRefresh && radarrCache.key === key && radarrCache.series.length && now - radarrCache.fetchedAt < SONARR_CACHE_TTL_MS) {
-    return { series: radarrCache.series, index: buildSonarrIndex(radarrCache.series), cached: true, fetchedAt: radarrCache.fetchedAt };
+  if (!forceRefresh && cacheReady && (cacheOnly || now - radarrCache.fetchedAt < libraryCacheTtlMs())) {
+    return buildLibraryPayload(radarrCache, key, { cached: true, cacheReady: true });
+  }
+
+  if (cacheOnly) {
+    return buildLibraryPayload(radarrCache, key, { cached: true, cacheReady });
   }
 
   if (!forceRefresh && radarrCache.promise && radarrCache.key === key) {
@@ -627,7 +1178,7 @@ async function loadRadarrLibrary(config, { forceRefresh = false } = {}) {
     radarrCache.key = key;
     radarrCache.series = list;
     radarrCache.fetchedAt = Date.now();
-    return { series: list, index: buildSonarrIndex(list), cached: false, fetchedAt: radarrCache.fetchedAt };
+    return { series: list, index: buildSonarrIndex(list), cached: false, cacheReady: true, fetchedAt: radarrCache.fetchedAt };
   })();
 
   radarrCache.key = key;
@@ -725,12 +1276,17 @@ function buildSonarrIndex(seriesList) {
   return index;
 }
 
-async function loadSonarrLibrary(config, { forceRefresh = false } = {}) {
-  const key = `${String(config.sonarrUrl || '')}::${String(config.sonarrApiKey || '')}`;
+async function loadSonarrLibrary(config, { forceRefresh = false, cacheOnly = false } = {}) {
+  const key = libraryKey(config.sonarrUrl, config.sonarrApiKey);
   const now = Date.now();
+  const cacheReady = hasValidCache(sonarrCache, key);
 
-  if (!forceRefresh && sonarrCache.key === key && sonarrCache.series.length && now - sonarrCache.fetchedAt < SONARR_CACHE_TTL_MS) {
-    return { series: sonarrCache.series, index: buildSonarrIndex(sonarrCache.series), cached: true, fetchedAt: sonarrCache.fetchedAt };
+  if (!forceRefresh && cacheReady && (cacheOnly || now - sonarrCache.fetchedAt < libraryCacheTtlMs())) {
+    return buildLibraryPayload(sonarrCache, key, { cached: true, cacheReady: true });
+  }
+
+  if (cacheOnly) {
+    return buildLibraryPayload(sonarrCache, key, { cached: true, cacheReady });
   }
 
   if (!forceRefresh && sonarrCache.promise && sonarrCache.key === key) {
@@ -743,7 +1299,7 @@ async function loadSonarrLibrary(config, { forceRefresh = false } = {}) {
     sonarrCache.key = key;
     sonarrCache.series = list;
     sonarrCache.fetchedAt = Date.now();
-    return { series: list, index: buildSonarrIndex(list), cached: false, fetchedAt: sonarrCache.fetchedAt };
+    return { series: list, index: buildSonarrIndex(list), cached: false, cacheReady: true, fetchedAt: sonarrCache.fetchedAt };
   })();
 
   sonarrCache.key = key;
@@ -826,6 +1382,251 @@ function isInSonarrLibrary(anime, library) {
   });
 }
 
+
+function unixToIso(unixSeconds) {
+  if (!unixSeconds) return null;
+  return new Date(Number(unixSeconds) * 1000).toISOString();
+}
+
+function getLastEpisodeInfo(anime) {
+  const nodes = Array.isArray(anime?.airingSchedule?.nodes) ? anime.airingSchedule.nodes : [];
+  const node = nodes
+    .filter((entry) => entry?.airingAt)
+    .sort((a, b) => Number(b.airingAt) - Number(a.airingAt))[0];
+
+  if (!node?.airingAt) {
+    return {
+      episode: null,
+      airingAt: null,
+      releaseDate: null,
+    };
+  }
+
+  return {
+    episode: node.episode ?? null,
+    airingAt: node.airingAt,
+    releaseDate: unixToIso(node.airingAt),
+  };
+}
+
+function getSonarrMatchIncludingFamily(anime, library) {
+  if (!library?.index) return null;
+
+  const { match } = findBestSeriesMatch(anime, library.index);
+  if (match) return match;
+
+  const familyTitles = getSonarrFamilyTitles(anime);
+  if (!familyTitles.length) return null;
+
+  return (library.series || []).find((series) => {
+    const seriesTitles = [
+      series?.title,
+      series?.sortTitle,
+      series?.titleSlug,
+      ...(Array.isArray(series?.alternateTitles)
+        ? series.alternateTitles.map((alt) => (typeof alt === 'string' ? alt : alt?.title)).filter(Boolean)
+        : []),
+    ]
+      .map((title) => normalizeFranchiseTitle(title))
+      .filter(Boolean);
+
+    return familyTitles.some((familyTitle) =>
+      seriesTitles.includes(normalizeFranchiseTitle(familyTitle))
+    );
+  }) || null;
+}
+
+function mapSeasonalAnimeForApi(anime, sonarrMatch = null) {
+  const lastEpisode = getLastEpisodeInfo(anime);
+
+  return {
+    id: anime.id,
+    idMal: anime.idMal ?? null,
+    dataSource: anime.dataSource || null,
+    title: pickTitle(anime),
+    titles: {
+      romaji: anime.title?.romaji ?? null,
+      english: anime.title?.english ?? null,
+      native: anime.title?.native ?? null,
+    },
+    synonyms: Array.isArray(anime.synonyms) ? anime.synonyms : [],
+    format: anime.format ?? null,
+    status: anime.status ?? null,
+    episodes: anime.episodes ?? null,
+    season: anime.season ?? null,
+    seasonYear: anime.seasonYear ?? null,
+    startDate: anime.startDate ?? null,
+    siteUrl: anime.siteUrl ?? null,
+    coverImage: anime.coverImage ?? null,
+    bannerImage: anime.bannerImage ?? null,
+    averageScore: anime.averageScore ?? null,
+    meanScore: anime.meanScore ?? null,
+    popularity: anime.popularity ?? null,
+    trending: anime.trending ?? null,
+    source: anime.source ?? null,
+    genres: Array.isArray(anime.genres) ? anime.genres : [],
+    tags: Array.isArray(anime.tags) ? anime.tags : [],
+    lastEpisode,
+    lastEpisodeReleaseDate: lastEpisode.releaseDate,
+    nextAiringEpisode: anime.nextAiringEpisode
+      ? {
+        episode: anime.nextAiringEpisode.episode ?? null,
+        airingAt: anime.nextAiringEpisode.airingAt ?? null,
+        releaseDate: unixToIso(anime.nextAiringEpisode.airingAt),
+        timeUntilAiring: anime.nextAiringEpisode.timeUntilAiring ?? null,
+      }
+      : null,
+    inSonarr: Boolean(sonarrMatch),
+    sonarr: sonarrMatch
+      ? {
+        seriesId: sonarrMatch.id ?? null,
+        tvdbId: sonarrMatch.tvdbId ?? null,
+        title: sonarrMatch.title ?? null,
+        path: sonarrMatch.path ?? null,
+        year: sonarrMatch.year ?? null,
+      }
+      : null,
+  };
+}
+
+async function fetchSeasonalAnimeForApi({ season, seasonYear, maxPages = 10 } = {}) {
+  const fallback = currentSeasonParts();
+  const resolvedSeason = String(season || fallback.season).toUpperCase();
+  const resolvedSeasonYear = Number(seasonYear || fallback.seasonYear);
+  const resolvedMaxPages = Math.min(20, Math.max(1, Number(maxPages) || 10));
+
+  let page = 1;
+  let hasNextPage = true;
+  const media = [];
+  let apiType = preferredApiType();
+  let apiSource = apiProviderLabel(apiType);
+  let fallbackUsed = false;
+  let fallbackFrom = null;
+  let fallbackError = null;
+
+  while (hasNextPage && page <= resolvedMaxPages) {
+    const pageData = await fetchAnimePage({
+      page,
+      perPage: 50,
+      season: resolvedSeason,
+      seasonYear: resolvedSeasonYear,
+      search: '',
+      sort: ['POPULARITY_DESC'],
+    });
+
+    media.push(...(pageData.media || []));
+    hasNextPage = Boolean(pageData.pageInfo?.hasNextPage);
+    apiType = pageData.apiType || apiType;
+    apiSource = pageData.apiSource || apiSource;
+    fallbackUsed = fallbackUsed || Boolean(pageData.fallbackUsed);
+    fallbackFrom = pageData.fallbackFrom || fallbackFrom;
+    fallbackError = pageData.fallbackError || fallbackError;
+    page += 1;
+  }
+
+  const deduped = new Map();
+  for (const anime of media) {
+    if (anime?.id != null && !deduped.has(anime.id)) deduped.set(anime.id, anime);
+  }
+
+  return {
+    season: resolvedSeason,
+    seasonYear: resolvedSeasonYear,
+    media: [...deduped.values()],
+    apiType,
+    apiSource,
+    fallbackUsed,
+    fallbackFrom,
+    fallbackError,
+  };
+}
+function clearLibrarySyncTimer() {
+  if (librarySyncState.timer) {
+    clearTimeout(librarySyncState.timer);
+    librarySyncState.timer = null;
+  }
+}
+
+function scheduleNextLibrarySync(delayMs = librarySyncInterval.ms) {
+  if (config.refreshOnLoad) {
+    librarySyncState.nextSyncAt = null;
+    clearLibrarySyncTimer();
+    return;
+  }
+
+  clearLibrarySyncTimer();
+  const safeDelay = Math.max(1_000, Number(delayMs) || librarySyncInterval.ms);
+  librarySyncState.nextSyncAt = Date.now() + safeDelay;
+  librarySyncState.timer = setTimeout(() => {
+    syncLibraries({ forceRefresh: true, reason: 'scheduled' }).catch((error) => {
+      console.warn(`Scheduled library sync failed: ${error.message || error}`);
+    });
+  }, safeDelay);
+}
+
+async function syncLibraries({ forceRefresh = true, reason = 'manual' } = {}) {
+  if (librarySyncState.promise) return librarySyncState.promise;
+
+  const promise = (async () => {
+    const startedAt = Date.now();
+    librarySyncState.syncing = true;
+    librarySyncState.lastReason = reason;
+    librarySyncState.lastError = null;
+    if (!config.refreshOnLoad) librarySyncState.nextSyncAt = null;
+
+    const jobs = [];
+    if (config.sonarrUrl && config.sonarrApiKey) {
+      jobs.push(['sonarr', loadSonarrLibrary(config, { forceRefresh })]);
+    }
+    if (config.radarrUrl && config.radarrApiKey) {
+      jobs.push(['radarr', loadRadarrLibrary(config, { forceRefresh })]);
+    }
+
+    if (!jobs.length) {
+      librarySyncState.lastSyncAt = Date.now();
+      librarySyncState.lastDurationMs = Date.now() - startedAt;
+      librarySyncState.lastResults = [];
+      return getLibrarySyncStatus();
+    }
+
+    const settled = await Promise.allSettled(jobs.map(([, job]) => job));
+    const results = settled.map((result, index) => {
+      const name = jobs[index][0];
+      if (result.status === 'fulfilled') {
+        return { name, ok: true, count: result.value?.index?.count ?? 0, fetchedAt: result.value?.fetchedAt || null };
+      }
+      return { name, ok: false, error: String(result.reason?.message || result.reason) };
+    });
+
+    const failures = results.filter((result) => !result.ok);
+    librarySyncState.lastSyncAt = Date.now();
+    librarySyncState.lastDurationMs = librarySyncState.lastSyncAt - startedAt;
+    librarySyncState.lastResults = results;
+    librarySyncState.lastError = failures.length ? failures.map((result) => `${result.name}: ${result.error}`).join('; ') : null;
+
+    return getLibrarySyncStatus();
+  })();
+
+  librarySyncState.promise = promise;
+  try {
+    return await promise;
+  } finally {
+    librarySyncState.syncing = false;
+    librarySyncState.promise = null;
+    if (!config.refreshOnLoad) scheduleNextLibrarySync(librarySyncInterval.ms);
+  }
+}
+
+function startLibraryBackgroundSync() {
+  if (config.refreshOnLoad) {
+    console.log('Library background sync disabled because REFRESHONLOAD=true');
+    return;
+  }
+
+  console.log(`Library background sync enabled every ${formatSyncInterval()}`);
+  scheduleNextLibrarySync(1_000);
+}
+
 async function handleApi(req, res, url) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -837,14 +1638,39 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === '/api/library-sync/status' && req.method === 'GET') {
+    json(res, 200, { ok: true, ...getLibrarySyncStatus() });
+    return;
+  }
+
+  if (url.pathname === '/api/library-sync/run' && req.method === 'POST') {
+    if (!config.showSyncNowButton) {
+      json(res, 403, { ok: false, error: 'Manual library sync is disabled by SHOW_SYNC_NOW_BUTTON=false.' });
+      return;
+    }
+
+    try {
+      await syncLibraries({ forceRefresh: true, reason: 'manual' });
+      json(res, 200, { ok: true, ...getLibrarySyncStatus() });
+    } catch (error) {
+      json(res, 500, { ok: false, error: String(error.message || error), ...getLibrarySyncStatus() });
+    }
+    return;
+  }
+
   if (url.pathname === '/api/radarr/library' && req.method === 'GET') {
     try {
-      const library = await loadRadarrLibrary(config, { forceRefresh: url.searchParams.get('refresh') === '1' });
+      const library = await loadRadarrLibrary(config, {
+        forceRefresh: url.searchParams.get('refresh') === '1',
+        cacheOnly: url.searchParams.get('cacheOnly') === '1',
+      });
       json(res, 200, {
         ok: true,
         count: library.index.count,
         fetchedAt: library.fetchedAt,
         cached: library.cached,
+        cacheReady: library.cacheReady,
+        syncStatus: getLibrarySyncStatus(),
         series: library.series.map((movie) => ({
           id: movie.id,
           tvdbId: movie.tvdbId ?? null,
@@ -949,6 +1775,72 @@ async function handleApi(req, res, url) {
     return;
   }
 
+
+  if (url.pathname === '/api/anime/all' && req.method === 'GET') {
+    try {
+      const seasonal = await fetchSeasonalAnimeForApi({
+        season: url.searchParams.get('season'),
+        seasonYear: url.searchParams.get('seasonYear'),
+        maxPages: url.searchParams.get('maxPages') || 10,
+      });
+
+      const items = seasonal.media.map((anime) => mapSeasonalAnimeForApi(anime));
+
+      json(res, 200, {
+        ok: true,
+        season: seasonal.season,
+        seasonYear: seasonal.seasonYear,
+        count: items.length,
+        apiType: seasonal.apiType,
+        apiSource: seasonal.apiSource,
+        fallbackUsed: seasonal.fallbackUsed,
+        fallbackFrom: seasonal.fallbackFrom,
+        fallbackError: seasonal.fallbackError,
+        items,
+      });
+    } catch (error) {
+      json(res, 500, { ok: false, error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if ((url.pathname === '/api/anime/insonarr' || url.pathname === '/api/anime/in-sonarr') && req.method === 'GET') {
+    try {
+      const [seasonal, library] = await Promise.all([
+        fetchSeasonalAnimeForApi({
+          season: url.searchParams.get('season'),
+          seasonYear: url.searchParams.get('seasonYear'),
+          maxPages: url.searchParams.get('maxPages') || 10,
+        }),
+        loadSonarrLibrary(config, { forceRefresh: url.searchParams.get('refresh') === '1' }),
+      ]);
+
+      const items = seasonal.media
+        .map((anime) => ({ anime, sonarrMatch: getSonarrMatchIncludingFamily(anime, library) }))
+        .filter((entry) => Boolean(entry.sonarrMatch))
+        .map((entry) => mapSeasonalAnimeForApi(entry.anime, entry.sonarrMatch));
+
+      json(res, 200, {
+        ok: true,
+        season: seasonal.season,
+        seasonYear: seasonal.seasonYear,
+        count: items.length,
+        apiType: seasonal.apiType,
+        apiSource: seasonal.apiSource,
+        fallbackUsed: seasonal.fallbackUsed,
+        fallbackFrom: seasonal.fallbackFrom,
+        fallbackError: seasonal.fallbackError,
+        sonarrLibraryCount: library.index.count,
+        sonarrFetchedAt: library.fetchedAt,
+        sonarrCached: library.cached,
+        items,
+      });
+    } catch (error) {
+      json(res, 500, { ok: false, error: String(error.message || error) });
+    }
+    return;
+  }
+
   if (url.pathname === '/api/anime') {
     const fallback = currentSeasonParts();
     const season = String(url.searchParams.get('season') || fallback.season).toUpperCase();
@@ -968,18 +1860,15 @@ async function handleApi(req, res, url) {
       .filter(Boolean);
 
     try {
-      const data = await fetchAniList({
-        query: ANILIST_LIST_QUERY,
-        variables: {
-          page,
-          perPage,
-          season,
-          seasonYear,
-          search: search || undefined,
-          sort: sort.length ? sort : ['TRENDING_DESC', 'POPULARITY_DESC'],
-        },
+      const data = await fetchAnimePage({
+        page,
+        perPage,
+        season,
+        seasonYear,
+        search,
+        sort: sort.length ? sort : ['TRENDING_DESC', 'POPULARITY_DESC'],
       });
-      json(res, 200, { ...data.Page, season, seasonYear });
+      json(res, 200, { ...data, season, seasonYear });
     } catch (error) {
       json(res, 500, { error: String(error.message || error) });
     }
@@ -990,11 +1879,8 @@ async function handleApi(req, res, url) {
   if (animeDetailMatch && req.method === 'GET') {
     try {
       const id = Number(animeDetailMatch[1]);
-      const data = await fetchAniList({
-        query: ANILIST_MEDIA_QUERY,
-        variables: { id },
-      });
-      json(res, 200, { ok: true, media: data.Media });
+      const data = await fetchAnimeDetail(id);
+      json(res, 200, data);
     } catch (error) {
       json(res, 500, { ok: false, error: String(error.message || error) });
     }
@@ -1003,12 +1889,17 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === '/api/sonarr/library' && req.method === 'GET') {
     try {
-      const library = await loadSonarrLibrary(config, { forceRefresh: url.searchParams.get('refresh') === '1' });
+      const library = await loadSonarrLibrary(config, {
+        forceRefresh: url.searchParams.get('refresh') === '1',
+        cacheOnly: url.searchParams.get('cacheOnly') === '1',
+      });
       json(res, 200, {
         ok: true,
         count: library.index.count,
         fetchedAt: library.fetchedAt,
         cached: library.cached,
+        cacheReady: library.cacheReady,
+        syncStatus: getLibrarySyncStatus(),
         series: library.series.map((series) => ({
           id: series.id,
           tvdbId: series.tvdbId ?? null,
@@ -1195,6 +2086,15 @@ async function handleApi(req, res, url) {
       radarrRootFolderPath: radarrRootFolderPath || null,
       autoloadPages: Number(process.env.AUTOLOAD_PAGES || 4),
       defaultType: String(config.defaultType || 'ALL').toUpperCase(),
+      apiType: preferredApiType(),
+      apiSource: apiProviderLabel(),
+      malConfigured: Boolean(String(config.malClientId || '').trim()),
+      refreshOnLoad: Boolean(config.refreshOnLoad),
+      syncInterval: librarySyncInterval.raw,
+      syncIntervalLabel: formatSyncInterval(),
+      syncIntervalMs: librarySyncInterval.ms,
+      showSyncNowButton: Boolean(config.showSyncNowButton),
+      librarySync: getLibrarySyncStatus(),
     });
     return;
   }
@@ -1207,29 +2107,13 @@ async function handleApi(req, res, url) {
       const range = getSeasonDateRange(season, seasonYear);
       const daysLeft = daysBetween(now, range.end);
 
-      // 1. Fetch seasonal anime
-      let page = 1;
-      let hasNextPage = true;
-      let media = [];
-
-      while (hasNextPage && page <= 5) { // safety limit
-        const data = await fetchAniList({
-          query: ANILIST_LIST_QUERY,
-          variables: {
-            page,
-            perPage: 50,
-            season,
-            seasonYear,
-            sort: ['POPULARITY_DESC']
-          },
-        });
-
-        const pageData = data.Page.media || [];
-        media = media.concat(pageData);
-
-        hasNextPage = data.Page.pageInfo?.hasNextPage;
-        page++;
-      }
+      // 1. Fetch seasonal anime from the configured preferred provider.
+      const seasonal = await fetchSeasonalAnimeForApi({
+        season,
+        seasonYear,
+        maxPages: 5,
+      });
+      const media = seasonal.media || [];
 
       const tv = media.filter((m) => m.format === 'TV');
       const movies = media.filter((m) => m.format === 'MOVIE');
@@ -1264,6 +2148,9 @@ for (const anime of tv) {
         seasonYear,
         seasonDisplay: `${seasonYear} ${season}`,
         daysLeft,
+        apiType: seasonal.apiType,
+        apiSource: seasonal.apiSource,
+        fallbackUsed: seasonal.fallbackUsed,
 
         tvTotal,
         movieTotal,
@@ -1340,4 +2227,5 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`NZB Anime Seasonal running on http://localhost:${PORT}`);
+  startLibraryBackgroundSync();
 });

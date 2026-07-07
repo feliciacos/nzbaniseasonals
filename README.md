@@ -1,17 +1,18 @@
 # NZB Anime Seasonal
 
-A local, mobile-first seasonal anime browser that pulls from AniList and lets you add series to Sonarr and movies to Radarr with one tap.
+A local, mobile-first seasonal anime browser that pulls from AniList or MyAnimeList and lets you add series to Sonarr and movies to Radarr with one tap.
 
 ---
 
 ## Features
 
 - Mobile UI for nzb360 integration
-- Seasonal anime feed (AniList)
+- Seasonal anime feed from AniList or MyAnimeList
 - Search by title, genres, and tags
 - One-click add to Sonarr (TV)
 - One-click add to Radarr (Movies)
 - Library detection (Sonarr + Radarr)
+- Background library sync with optional manual Sync now button
 - [GetHomepage](https://gethomepage.dev/) support API 
 
 ---
@@ -40,11 +41,21 @@ SONARR_ROOT_FOLDER_PATH=YOUR_SONARR_ROOTFOLDER
 SONARR_MONITOR_NEW_ITEMS=all
 SONARR_SEASON_FOLDER=true
 
+# Anime metadata provider
+APITYPE=ANI
+MAL_CLIENT_ID=YOUR_MAL_CLIENT_ID
+MAL_CLIENT_SECRET=YOUR_MAL_CLIENT_SECRET
+
 # Radarr
 RADARR_URL=http://YOUR_RADARR_IP:7878
 RADARR_API_KEY=YOUR_API_KEY
 RADARR_QUALITY_PROFILE_ID=1
 RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
+
+# Library sync
+REFRESHONLOAD=false
+SYNC_INTERVAL=30m
+SHOW_SYNC_NOW_BUTTON=true
 ```
 
 ---
@@ -59,6 +70,13 @@ RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 | `SONARR_ROOT_FOLDER_PATH`   | Root folder for anime                   |
 | `SONARR_MONITOR_NEW_ITEMS`  | What to monitor                         |
 | `SONARR_SEASON_FOLDER`      | Create season folders                   |
+
+## Anime Metadata Provider
+| Variable | Description | Values |
+| -------- | ----------- | ------ |
+| `APITYPE` | Preferred anime metadata provider. `ANI` uses AniList first and falls back to MAL when `MAL_CLIENT_ID` is configured. `MAL` uses MyAnimeList first and falls back to AniList if MAL is unavailable. | `ANI` / `MAL` |
+| `MAL_CLIENT_ID` | MyAnimeList API Client ID. Required when `APITYPE=MAL`; optional fallback when `APITYPE=ANI`. Keep this server-side only. | Your MAL Client ID |
+| `MAL_CLIENT_SECRET` | MyAnimeList API Client Secret. Stored for future OAuth use; the current public metadata calls only need the Client ID. Keep this secret server-side only. | Your MAL Client Secret |
 
 ## Radarr
 | Variable                    | Description                             |
@@ -75,10 +93,27 @@ RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 | `PORT`           | Overwrite the local port number                              | `8787` or any valid port                                        |
 | `DEFAULTSEASON`  | Sets the default selected season button on load              | `last` / `current` / `next`                                     |
 | `DEFAULTSORT`    | Sets the default sorting button on load                      | `trending` / `popular` / `top` / `newest` / `name`              |
-| `DEFAULTTYPE`    | Sets how many extra pages auto-load when the list is visible | `ALL` / `TV` / `MOVIE` / `OVA` / `ONA` / `TV_SHORT` / `SPECIAL` |
+| `DEFAULTTYPE`    | Sets the default type filter on load                         | `ALL` / `TV` / `MOVIE` / `OVA` / `ONA` / `TV_SHORT` / `SPECIAL` |
 | `ALREADYINLIB`   | Sets the default library filter on load                      | `true` / `false` / `none`                                       |
-| `PER_PAGE`       | Sets how many titles load per AniList request                | Any positive integer, usually `20`                              |
+| `PER_PAGE`       | Sets how many titles load per provider request               | Any positive integer, usually `20`                              |
 | `AUTOLOAD_PAGES` | Sets how many extra pages auto-load when the list is visible | Any positive integer, usually `1` to `8`                        |
+
+## Library Sync
+| Variable | Description | Values |
+| -------- | ----------- | ------ |
+| `REFRESHONLOAD` | When `true`, the frontend waits for a fresh Sonarr/Radarr library refresh on load. When `false`, the backend refreshes libraries in the background and the frontend loads from cached library state. | `true` / `false`, default `false` |
+| `SYNC_INTERVAL` | Background Sonarr/Radarr library sync interval. Used only when `REFRESHONLOAD=false`. | `xm`, `xh`, or `xd`, for example `1m`, `1h`, `1d`; default `30m` |
+| `SHOW_SYNC_NOW_BUTTON` | Shows or hides the frontend **Sync now** button next to the sync status. | `true` / `false`, default `true` |
+
+These can also be set in `config.json` with camelCase keys:
+
+```json
+{
+  "refreshOnLoad": false,
+  "syncInterval": "30m",
+  "showSyncNowButton": true
+}
+```
 
 ---
 
@@ -86,6 +121,17 @@ RADARR_ROOT_FOLDER_PATH=YOUR_RADARR_ROOTFOLDER
 
 ```bash
 docker compose up --build
+```
+
+You can also set the provider directly in Docker / Portainer environment variables:
+
+```env
+APITYPE=MAL
+MAL_CLIENT_ID=your_client_id_here
+MAL_CLIENT_SECRET=your_client_secret_here
+REFRESHONLOAD=false
+SYNC_INTERVAL=30m
+SHOW_SYNC_NOW_BUTTON=true
 ```
 
 ---
@@ -128,8 +174,9 @@ Add below to your services.yaml
 
 ## How it works
 
-- Anime data comes from **AniList (GraphQL API)**
-- The app checks your Sonarr and Radarr libraries
+- Anime data comes from the configured provider: **AniList GraphQL** or **MyAnimeList API v2**. Set `APITYPE=ANI` or `APITYPE=MAL`.
+- The backend keeps Sonarr and Radarr libraries synced in the background when `REFRESHONLOAD=false`.
+- The frontend shows `Synced Libraries {sync time} - next sync: ...` and can show a **Sync now** button.
 - Matching uses:
   - English + Japanese titles
   - Synonyms
@@ -149,6 +196,8 @@ Add below to your services.yaml
   - Search
   - Sorting
 - Click an anime to open the full details page, shows description and other information, this page also allows adding to Sonarr/Radarr.
+- The status line shows the latest library sync time and the next scheduled background sync.
+- Use **Sync now** to refresh Sonarr/Radarr immediately when `SHOW_SYNC_NOW_BUTTON=true`.
 
 ## Screenshots
 ### Homepage
