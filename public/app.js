@@ -71,6 +71,13 @@ let apiFallbackNote = null;
 let librarySyncStatus = null;
 let librarySyncPollTimer = null;
 let lastSeenLibrarySyncKey = null;
+let listScrollY = Number(sessionStorage.getItem('nzbaListScrollY') || 0);
+let currentRouteType = 'list';
+let scrollSaveQueued = false;
+
+if ('scrollRestoration' in history) {
+  history.scrollRestoration = 'manual';
+}
 
 const seasonLabel = (season) => ({ SPRING: 'Spring', SUMMER: 'Summer', FALL: 'Fall', WINTER: 'Winter' }[season] || season);
 const seasonOrder = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
@@ -537,6 +544,43 @@ function formatTimeUntil(timestamp) {
   return formatRelativeDuration(value - Date.now());
 }
 
+function currentScrollY() {
+  return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+}
+
+function saveListScrollPosition() {
+  if (!listView || listView.hidden || isDetailRoute()) return;
+  listScrollY = currentScrollY();
+  sessionStorage.setItem('nzbaListScrollY', String(listScrollY));
+}
+
+function scheduleListScrollSave() {
+  if (scrollSaveQueued) return;
+  scrollSaveQueued = true;
+  requestAnimationFrame(() => {
+    scrollSaveQueued = false;
+    saveListScrollPosition();
+  });
+}
+
+function restoreListScrollPosition() {
+  const stored = Number(sessionStorage.getItem('nzbaListScrollY') || listScrollY || 0);
+  const target = Number.isFinite(stored) ? Math.max(0, stored) : 0;
+  let attempts = 0;
+
+  const restore = () => {
+    if (isDetailRoute()) return;
+    attempts += 1;
+    window.scrollTo({ top: target, left: 0, behavior: 'auto' });
+
+    if (attempts < 8 && Math.abs(currentScrollY() - target) > 4) {
+      requestAnimationFrame(restore);
+    }
+  };
+
+  requestAnimationFrame(() => requestAnimationFrame(restore));
+}
+
 function configuredLibraryCount() {
   return Number(Boolean(meta?.sonarrConfigured)) + Number(Boolean(meta?.radarrConfigured));
 }
@@ -840,6 +884,7 @@ function renderItems() {
 }
 
 function navigateToAnime(id) {
+  saveListScrollPosition();
   location.hash = `#anime/${id}`;
 }
 
@@ -1245,12 +1290,14 @@ function isDetailRoute() {
 async function openAnimeDetail(id, { pushState = true } = {}) {
   currentDetailId = Number(id);
   if (pushState) {
+    saveListScrollPosition();
     location.hash = `#anime/${id}`;
     return;
   }
 
   listView.hidden = true;
   detailView.hidden = false;
+  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
 
   const cached = items.find((item) => String(item.id) === String(id));
   if (cached) {
@@ -1281,20 +1328,27 @@ async function openAnimeDetail(id, { pushState = true } = {}) {
   }
 }
 
-function showListView() {
+function showListView({ restoreScroll = false } = {}) {
   detailFetchToken += 1;
   listView.hidden = false;
   detailView.hidden = true;
   currentDetailAnime = null;
   currentDetailId = null;
   renderVisibleView();
+  if (restoreScroll) {
+    restoreListScrollPosition();
+  }
 }
 
 function handleRoute() {
   if (isDetailRoute()) {
+    if (currentRouteType === 'list') saveListScrollPosition();
+    currentRouteType = 'detail';
     void openAnimeDetail(Number(location.hash.split('/')[1]), { pushState: false });
   } else {
-    showListView();
+    const restoreScroll = currentRouteType === 'detail';
+    currentRouteType = 'list';
+    showListView({ restoreScroll });
   }
 }
 
@@ -1339,7 +1393,7 @@ refreshBtn.addEventListener('click', async () => {
 
 backBtn.addEventListener('click', () => {
   if (location.hash) location.hash = '';
-  else showListView();
+  else showListView({ restoreScroll: true });
 });
 
 detailAddBtn.addEventListener('click', async () => {
@@ -1480,6 +1534,8 @@ function setupLoadMoreObserver() {
   loadMoreObserver.observe(loadMoreBtn);
 }
 
+window.addEventListener('scroll', scheduleListScrollSave, { passive: true });
+window.addEventListener('pagehide', saveListScrollPosition);
 window.addEventListener('hashchange', handleRoute);
 
 (async () => {
